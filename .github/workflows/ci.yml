@@ -23,5 +23,7 @@ jobs:
         uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
+          # No dependencies to cache, and pnpm is intentionally not installed.
+          package-manager-cache: false
       - name: Run tests
         run: node --test packages/session-hub/test/
