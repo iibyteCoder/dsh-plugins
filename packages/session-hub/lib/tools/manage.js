@@ -15,12 +15,22 @@ import { requireController, requireWorkspaceController } from '../services.js'
 
 const RENDER_TEXT = (_args, value) => [{ type: 'text', text: String(value ?? '') }]
 
-const SESSION_UPDATE_DESCRIPTION = [
-  'Update an existing DeepSeek Harness session: rename it and/or select its model.',
+const SELF_CLOSE_ERROR = 'session-hub: SELF_CLOSE_FORBIDDEN: a session cannot close itself'
+
+const SESSION_UPDATE_DESCRIPTION =
+  'Update an existing DeepSeek Harness session: rename it and/or select its model.'
+
+const SESSION_UPDATE_DESCRIPTION_OWNED = [
+  SESSION_UPDATE_DESCRIPTION,
   'Updating a session the caller did not create requires confirm: true.',
 ].join(' ')
 
 const SESSION_CLOSE_DESCRIPTION = [
+  'Close a DeepSeek Harness session by archiving it and stopping its activity.',
+  'Restore it later with session_open. The calling session cannot close itself.',
+].join(' ')
+
+const SESSION_CLOSE_DESCRIPTION_OWNED = [
   'Close a DeepSeek Harness session by archiving it and stopping its activity.',
   'Restore it later with session_open. Closing the calling session or a session the caller did not create requires confirm: true.',
 ].join(' ')
@@ -32,45 +42,59 @@ const SESSION_OPEN_DESCRIPTION = [
 /**
  * Build the mutating session tools bound to a host context.
  *
+ * The permission mode is normalized by `lib/config.js` when the plugin is
+ * applied. Any value other than `'owned'` (including the default) registers
+ * the permissive surface: no `confirm` parameter and no ownership checks.
+ *
  * @param {object} ctx - Cordis context provided by the DSH host.
+ * @param {{permissionMode?: 'permissive' | 'owned'}} [options]
  * @returns {object[]} Tool definitions ready for `ctx.tools.register`.
  */
-export function createManageTools(ctx) {
-  return [createSessionUpdateTool(ctx), createSessionCloseTool(ctx), createSessionOpenTool(ctx)]
+export function createManageTools(ctx, { permissionMode = 'permissive' } = {}) {
+  return [
+    createSessionUpdateTool(ctx, permissionMode),
+    createSessionCloseTool(ctx, permissionMode),
+    createSessionOpenTool(ctx),
+  ]
 }
 
-function createSessionUpdateTool(ctx) {
+function createSessionUpdateTool(ctx, permissionMode) {
+  const owned = permissionMode === 'owned'
+  const properties = {
+    session_id: {
+      type: 'string',
+      description: 'Session id to update.',
+    },
+    title: {
+      type: 'string',
+      description: 'New session title.',
+    },
+    model: {
+      type: 'string',
+      description: 'Model id to select. Resolved against the model catalog when provider is omitted.',
+    },
+    provider: {
+      type: 'string',
+      description: 'Provider id for model. Requires model.',
+    },
+    reasoning_effort: {
+      type: 'string',
+      description: 'Reasoning effort for the selected model. Requires model.',
+    },
+  }
+  if (owned) {
+    properties.confirm = {
+      type: 'boolean',
+      description: 'Must be true to update a session the caller did not create.',
+    }
+  }
+
   return {
     name: 'session_update',
-    description: SESSION_UPDATE_DESCRIPTION,
+    description: owned ? SESSION_UPDATE_DESCRIPTION_OWNED : SESSION_UPDATE_DESCRIPTION,
     parameters: {
       type: 'object',
-      properties: {
-        session_id: {
-          type: 'string',
-          description: 'Session id to update.',
-        },
-        title: {
-          type: 'string',
-          description: 'New session title.',
-        },
-        model: {
-          type: 'string',
-          description: 'Model id to select. Resolved against the model catalog when provider is omitted.',
-        },
-        provider: {
-          type: 'string',
-          description: 'Provider id for model. Requires model.',
-        },
-        reasoning_effort: {
-          type: 'string',
-          description: 'Reasoning effort for the selected model. Requires model.',
-        },
-        confirm: {
-          type: 'boolean',
-          description: 'Must be true to update a session the caller did not create.',
-        },
-      },
+      properties,
       required: ['session_id'],
     },
     output: {
@@ -79,7 +103,7 @@ function createSessionUpdateTool(ctx) {
     },
     async execute(args, exec) {
       try {
-        return await executeSessionUpdate(ctx, args, exec)
+        return await executeSessionUpdate(ctx, args, exec, permissionMode)
       } catch (error) {
         return toErrorText(error)
       }
@@ -87,22 +111,27 @@ function createSessionUpdateTool(ctx) {
   }
 }
 
-function createSessionCloseTool(ctx) {
+function createSessionCloseTool(ctx, permissionMode) {
+  const owned = permissionMode === 'owned'
+  const properties = {
+    session_id: {
+      type: 'string',
+      description: 'Session id to close.',
+    },
+  }
+  if (owned) {
+    properties.confirm = {
+      type: 'boolean',
+      description: 'Must be true to close the calling session or a session the caller did not create.',
+    }
+  }
+
   return {
     name: 'session_close',
-    description: SESSION_CLOSE_DESCRIPTION,
+    description: owned ? SESSION_CLOSE_DESCRIPTION_OWNED : SESSION_CLOSE_DESCRIPTION,
     parameters: {
       type: 'object',
-      properties: {
-        session_id: {
-          type: 'string',
-          description: 'Session id to close.',
-        },
-        confirm: {
-          type: 'boolean',
-          description: 'Must be true to close the calling session or a session the caller did not create.',
-        },
-      },
+      properties,
       required: ['session_id'],
     },
     output: {
@@ -111,7 +140,7 @@ function createSessionCloseTool(ctx) {
     },
     async execute(args, exec) {
       try {
-        return await executeSessionClose(ctx, args, exec)
+        return await executeSessionClose(ctx, args, exec, permissionMode)
       } catch (error) {
         return toErrorText(error)
       }
@@ -147,19 +176,21 @@ function createSessionOpenTool(ctx) {
   }
 }
 
-async function executeSessionUpdate(ctx, rawArgs, exec) {
+async function executeSessionUpdate(ctx, rawArgs, exec, permissionMode) {
   const args = rawArgs ?? {}
   const controller = requireController(ctx)
 
   const sessionId = nonEmptyString(args.session_id)
   if (sessionId === '') return 'session-hub: session_id is required'
 
-  const callerId = callerIdOf(exec)
-  const ownerId = await ownerOf(sessionId)
-  // `confirm` only counts when it is the boolean true; "true", 1 and the like
-  // must not be accepted as authorization.
-  if (confirmRequired(ownerId, callerId) && args.confirm !== true) {
-    return confirmError(sessionId)
+  if (permissionMode === 'owned') {
+    const callerId = callerIdOf(exec)
+    const ownerId = await ownerOf(sessionId)
+    // `confirm` only counts when it is the boolean true; "true", 1 and the like
+    // must not be accepted as authorization.
+    if (confirmRequired(ownerId, callerId) && args.confirm !== true) {
+      return confirmError(sessionId)
+    }
   }
 
   const title = nonEmptyString(args.title)
@@ -205,21 +236,24 @@ async function executeSessionUpdate(ctx, rawArgs, exec) {
   return lines.join('\n')
 }
 
-async function executeSessionClose(ctx, rawArgs, exec) {
+async function executeSessionClose(ctx, rawArgs, exec, permissionMode) {
   const args = rawArgs ?? {}
   const sessionId = nonEmptyString(args.session_id)
   if (sessionId === '') return 'session-hub: session_id is required'
 
   const callerId = callerIdOf(exec)
-  const ownerId = await ownerOf(sessionId)
-  // Closing the calling session always needs confirmation; otherwise only a
-  // session created by another session is exempt.
+  // Self-close is decided first, before any confirmation check. Permissive
+  // mode has no confirm escape hatch, so the call is refused outright; owned
+  // mode keeps the existing explicit-confirmation path.
   const isSelf = callerId !== '' && sessionId === callerId
-  if (
-    confirmRequired(ownerId, callerId, { selfRequiresConfirm: isSelf }) &&
-    args.confirm !== true
-  ) {
-    return confirmError(sessionId)
+  if (isSelf) {
+    if (permissionMode === 'permissive') return SELF_CLOSE_ERROR
+    if (args.confirm !== true) return confirmError(sessionId)
+  } else if (permissionMode === 'owned') {
+    const ownerId = await ownerOf(sessionId)
+    if (confirmRequired(ownerId, callerId) && args.confirm !== true) {
+      return confirmError(sessionId)
+    }
   }
 
   const workspaceController = requireWorkspaceController(ctx)

@@ -26,10 +26,14 @@ const SESSION_GET_DESCRIPTION = [
 /**
  * Build the read-only session tools bound to a host context.
  *
+ * Read tools are allowed on every session in both permission modes, so the
+ * mode is accepted for a uniform factory signature but does not change them.
+ *
  * @param {object} ctx - Cordis context provided by the DSH host.
+ * @param {{permissionMode?: 'permissive' | 'owned'}} [options]
  * @returns {object[]} Tool definitions ready for `ctx.tools.register`.
  */
-export function createReadTools(ctx) {
+export function createReadTools(ctx, { permissionMode } = {}) {
   return [createSessionListTool(ctx), createSessionGetTool(ctx)]
 }
 

@@ -15,10 +15,14 @@ const SESSION_CREATE_DESCRIPTION = [
 /**
  * Build the `session_create` tool bound to a host context.
  *
+ * The permission mode is accepted for a uniform factory signature;
+ * `session_create` behaves the same in every mode.
+ *
  * @param {object} ctx - Cordis context provided by the DSH host.
+ * @param {{permissionMode?: 'permissive' | 'owned'}} [options]
  * @returns {object} Tool definition ready for `ctx.tools.register`.
  */
-export function createSessionCreateTool(ctx) {
+export function createSessionCreateTool(ctx, { permissionMode } = {}) {
   return {
     name: 'session_create',
     description: SESSION_CREATE_DESCRIPTION,

@@ -27,10 +27,14 @@ const SESSION_INTERRUPT_DESCRIPTION = [
 /**
  * Build the communication session tools bound to a host context.
  *
+ * The permission mode is accepted for a uniform factory signature; send and
+ * interrupt keep their existing ownership checks in every mode for now.
+ *
  * @param {object} ctx - Cordis context provided by the DSH host.
+ * @param {{permissionMode?: 'permissive' | 'owned'}} [options]
  * @returns {object[]} Tool definitions ready for `ctx.tools.register`.
  */
-export function createSendTools(ctx) {
+export function createSendTools(ctx, { permissionMode } = {}) {
   return [createSessionSendTool(ctx), createSessionInterruptTool(ctx)]
 }
 
