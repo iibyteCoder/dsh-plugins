@@ -3,7 +3,7 @@ import path from 'node:path'
 import { resolveModelSelection } from '../control.js'
 import { sendToSession } from '../messaging.js'
 import { recordOwner } from '../owner-index.js'
-import { requireController } from '../services.js'
+import { requireController, serviceOf } from '../services.js'
 
 const RENDER_TEXT = (_args, value) => [{ type: 'text', text: String(value ?? '') }]
 
@@ -216,7 +216,7 @@ async function recordOwnership(sessionId, callerId) {
  * @returns {Promise<object|null>}
  */
 async function findWorkspace(ctx, needle) {
-  const registry = ctx?.workspaceRegistry
+  const registry = serviceOf(ctx, 'workspaceRegistry')
   if (registry === undefined || registry === null || typeof registry.list !== 'function') return null
 
   let listed

@@ -63,6 +63,11 @@ function createCtx(overrides = {}) {
     sessions: { get: () => undefined },
     agents: { get: () => undefined },
     ...overrides,
+    // The host resolves services through `ctx.get(name)`, never through plain
+    // property reads; mirror that so these fixtures keep the host contract.
+    get(name) {
+      return this[name]
+    },
   }
 }
 

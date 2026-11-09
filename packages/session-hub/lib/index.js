@@ -30,5 +30,4 @@ export function apply(ctx) {
   ]) {
     tools.register(tool)
   }
-  ctx.logger?.debug?.('session-hub: plugin mounted')
 }

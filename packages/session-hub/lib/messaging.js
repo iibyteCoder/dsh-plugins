@@ -13,7 +13,7 @@
 import { randomUUID } from 'node:crypto'
 
 import { truncateText } from './format.js'
-import { requireController } from './services.js'
+import { requireController, serviceOf } from './services.js'
 
 const DEFAULT_TIMEOUT_MS = 120000
 const MIN_TIMEOUT_MS = 1000
@@ -88,7 +88,7 @@ export async function sendToSession(
  * @returns {string[]}
  */
 export function readArchivedIds(ctx) {
-  const ids = ctx?.workspaceRegistry?.archivedSessionIds
+  const ids = serviceOf(ctx, 'workspaceRegistry')?.archivedSessionIds
   if (!Array.isArray(ids)) return []
   return ids.filter((id) => typeof id === 'string')
 }
@@ -179,7 +179,7 @@ async function readLatestReply(ctx, controller, sessionId) {
  */
 function readSnapshotEvents(ctx, sessionId) {
   try {
-    const session = ctx?.sessions?.get?.(sessionId)
+    const session = serviceOf(ctx, 'sessions')?.get?.(sessionId)
     if (session === undefined || session === null || typeof session.snapshotEvents !== 'function') {
       return []
     }
