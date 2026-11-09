@@ -28,8 +28,32 @@ const workspaces = [
   { id: 'ws-beta', title: 'Beta Workspace', path: betaDir },
 ]
 
+const catalog = {
+  default: { provider: 'p1', model: 'model-a' },
+  routableProviders: ['p1', 'p2'],
+  groups: [
+    {
+      id: 'p1',
+      name: 'Provider One',
+      models: [
+        { id: 'model-a', name: 'Model A' },
+        { id: 'shared', name: 'Shared Model' },
+      ],
+    },
+    {
+      id: 'p2',
+      name: 'Provider Two',
+      models: [
+        { id: 'model-b', name: 'Model B' },
+        { id: 'shared', name: 'Shared Model' },
+      ],
+    },
+  ],
+  failures: [],
+}
+
 function createCtx(overrides = {}) {
-  const calls = { create: [], rename: [] }
+  const calls = { create: [], rename: [], selectModel: [], modelCatalog: 0 }
   const ctx = {
     sessionController: {
       create: async (request) => {
@@ -39,6 +63,14 @@ function createCtx(overrides = {}) {
       rename: async (request) => {
         calls.rename.push(request)
         return {}
+      },
+      selectModel: async (request) => {
+        calls.selectModel.push(request)
+        return {}
+      },
+      modelCatalog: async () => {
+        calls.modelCatalog += 1
+        return catalog
       },
     },
     workspaceRegistry: { list: async () => workspaces },
@@ -162,6 +194,68 @@ test('session_create keeps the creation result when rename fails', async () => {
 
   assert.match(text, /^已创建会话 new-session$/m)
   assert.match(text, /^- title: 设置失败（rename denied）$/m)
+})
+
+test('session_create selects an explicit model after creation', async () => {
+  const { ctx, calls } = createCtx()
+
+  const text = await runCreate(
+    { model: 'model-b', provider: 'p2', reasoning_effort: 'low' },
+    ctx,
+  )
+
+  assert.deepEqual(calls.create, [{}])
+  assert.equal(calls.modelCatalog, 0)
+  assert.deepEqual(calls.selectModel, [
+    { sessionId: 'new-session', provider: 'p2', model: 'model-b', reasoningEffort: 'low' },
+  ])
+  assert.match(text, /^已创建会话 new-session$/m)
+  assert.match(text, /^- model: p2\/model-b$/m)
+})
+
+test('session_create resolves a model through the catalog', async () => {
+  const { ctx, calls } = createCtx()
+
+  const text = await runCreate({ model: 'model-a' }, ctx)
+
+  assert.equal(calls.modelCatalog, 1)
+  assert.deepEqual(calls.selectModel, [
+    { sessionId: 'new-session', provider: 'p1', model: 'model-a' },
+  ])
+  assert.match(text, /^- model: p1\/model-a$/m)
+})
+
+test('session_create appends the model line after the title line', async () => {
+  const { ctx } = createCtx()
+
+  const text = await runCreate(
+    { title: 'Build the thing', model: 'model-a', provider: 'p1' },
+    ctx,
+  )
+
+  assert.ok(text.indexOf('- title: Build the thing') < text.indexOf('- model: p1/model-a'))
+})
+
+test('session_create keeps the session when the model cannot be resolved', async () => {
+  const { ctx, calls } = createCtx()
+
+  const text = await runCreate({ model: 'nope' }, ctx)
+
+  assert.deepEqual(calls.create, [{}])
+  assert.deepEqual(calls.selectModel, [])
+  assert.match(text, /^已创建会话 new-session$/m)
+  assert.match(text, /^- model: 失败（session-hub: model "nope" is not routable）$/m)
+})
+
+test('session_create keeps the session when only reasoning_effort is given', async () => {
+  const { ctx, calls } = createCtx()
+
+  const text = await runCreate({ reasoning_effort: 'high' }, ctx)
+
+  assert.deepEqual(calls.create, [{}])
+  assert.deepEqual(calls.selectModel, [])
+  assert.match(text, /^已创建会话 new-session$/m)
+  assert.match(text, /^- model: 失败（session-hub: reasoning_effort requires model）$/m)
 })
 
 test('session_create forwards agent_preset as agentPreset', async () => {

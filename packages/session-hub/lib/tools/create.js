@@ -1,5 +1,6 @@
 import path from 'node:path'
 
+import { resolveModelSelection } from '../control.js'
 import { recordOwner } from '../owner-index.js'
 import { requireController } from '../services.js'
 
@@ -38,6 +39,18 @@ export function createSessionCreateTool(ctx) {
         agent_preset: {
           type: 'string',
           description: 'Agent preset passed to the host create request.',
+        },
+        model: {
+          type: 'string',
+          description: 'Model id to select after creation. Resolved against the model catalog when provider is omitted.',
+        },
+        provider: {
+          type: 'string',
+          description: 'Provider id for model. Requires model.',
+        },
+        reasoning_effort: {
+          type: 'string',
+          description: 'Reasoning effort for the selected model. Requires model.',
         },
       },
       required: [],
@@ -113,6 +126,23 @@ async function executeSessionCreate(ctx, rawArgs, exec) {
       // The session exists either way; report the rename problem without
       // turning a successful create into a failure.
       lines.push(`- title: 设置失败（${errorMessage(error)}）`)
+    }
+  }
+
+  // The session is already created at this point: a model problem must be
+  // reported, never turn the create result into a failure.
+  if (hasModelRequest(args)) {
+    const resolution = await resolveModelSelection(controller, args)
+    if (resolution?.error !== undefined) {
+      lines.push(`- model: 失败（${resolution.error}）`)
+    } else if (resolution !== null) {
+      const selection = resolution.selection
+      try {
+        await controller.selectModel({ sessionId, ...selection })
+        lines.push(`- model: ${selection.provider}/${selection.model}`)
+      } catch (error) {
+        lines.push(`- model: 失败（${errorMessage(error)}）`)
+      }
     }
   }
 
@@ -222,6 +252,20 @@ function presetLabel(created, requested) {
   const resolved = created?.agentPreset
   if (typeof resolved === 'string' && resolved !== '') return resolved
   return requested === '' ? '-' : requested
+}
+
+/**
+ * True when any model-selection argument carries a value.
+ *
+ * @param {object} args
+ * @returns {boolean}
+ */
+function hasModelRequest(args) {
+  return (
+    nonEmptyString(args.model) !== '' ||
+    nonEmptyString(args.provider) !== '' ||
+    nonEmptyString(args.reasoning_effort) !== ''
+  )
 }
 
 function nonEmptyString(value) {

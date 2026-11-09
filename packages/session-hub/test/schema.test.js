@@ -2,11 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createSessionCreateTool } from '../lib/tools/create.js'
+import { createManageTools } from '../lib/tools/manage.js'
 import { createReadTools } from '../lib/tools/read.js'
 import { assertSupportedSchema, isPlainObject } from './helpers/schema-guard.js'
 
 const ctx = { tools: { register() {} } }
-const tools = [...createReadTools(ctx), createSessionCreateTool(ctx)]
+const tools = [
+  ...createReadTools(ctx),
+  createSessionCreateTool(ctx),
+  ...createManageTools(ctx),
+]
 
 function toolByName(toolName) {
   const tool = tools.find((candidate) => candidate.name === toolName)
@@ -17,7 +22,7 @@ function toolByName(toolName) {
 test('registered tools expose the expected names', () => {
   assert.deepEqual(
     tools.map((tool) => tool.name),
-    ['session_list', 'session_get', 'session_create'],
+    ['session_list', 'session_get', 'session_create', 'session_update', 'session_close', 'session_open'],
   )
 })
 
@@ -41,6 +46,9 @@ test('session_create parameters are optional strings', () => {
   assert.deepEqual(Object.keys(parameters.properties).sort(), [
     'agent_preset',
     'cwd',
+    'model',
+    'provider',
+    'reasoning_effort',
     'title',
     'workspace',
   ])
