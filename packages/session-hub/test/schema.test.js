@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { createSessionCreateTool } from '../lib/tools/create.js'
 import { createManageTools } from '../lib/tools/manage.js'
 import { createReadTools } from '../lib/tools/read.js'
+import { createSendTools } from '../lib/tools/send.js'
 import { assertSupportedSchema, isPlainObject } from './helpers/schema-guard.js'
 
 const ctx = { tools: { register() {} } }
@@ -11,6 +12,7 @@ const tools = [
   ...createReadTools(ctx),
   createSessionCreateTool(ctx),
   ...createManageTools(ctx),
+  ...createSendTools(ctx),
 ]
 
 function toolByName(toolName) {
@@ -22,7 +24,16 @@ function toolByName(toolName) {
 test('registered tools expose the expected names', () => {
   assert.deepEqual(
     tools.map((tool) => tool.name),
-    ['session_list', 'session_get', 'session_create', 'session_update', 'session_close', 'session_open'],
+    [
+      'session_list',
+      'session_get',
+      'session_create',
+      'session_update',
+      'session_close',
+      'session_open',
+      'session_send',
+      'session_interrupt',
+    ],
   )
 })
 
@@ -46,6 +57,7 @@ test('session_create parameters are optional strings', () => {
   assert.deepEqual(Object.keys(parameters.properties).sort(), [
     'agent_preset',
     'cwd',
+    'initial_message',
     'model',
     'provider',
     'reasoning_effort',
@@ -60,10 +72,12 @@ test('session_create parameters are optional strings', () => {
 test('numeric options do not rely on minimum or maximum', () => {
   const limit = toolByName('session_list').parameters.properties.limit
   const includeRecent = toolByName('session_get').parameters.properties.include_recent
+  const timeoutMs = toolByName('session_send').parameters.properties.timeout_ms
 
   for (const [label, schema] of [
     ['session_list.limit', limit],
     ['session_get.include_recent', includeRecent],
+    ['session_send.timeout_ms', timeoutMs],
   ]) {
     assert.equal('minimum' in schema, false, `${label}: "minimum" is not supported by the host`)
     assert.equal('maximum' in schema, false, `${label}: "maximum" is not supported by the host`)
@@ -84,4 +98,26 @@ test('status filter keeps its enum values and default', () => {
   assert.equal(status.type, 'string')
   assert.deepEqual(status.enum, ['running', 'idle', 'blank', 'archived', 'all'])
   assert.equal(status.default, 'all')
+})
+
+test('session_send declares its required parameters and delivery options', () => {
+  const parameters = toolByName('session_send').parameters
+
+  assert.deepEqual(parameters.required, ['session_id', 'message'])
+  assert.equal(parameters.properties.mode.type, 'string')
+  assert.deepEqual(parameters.properties.mode.enum, ['queue', 'steer'])
+  assert.equal(parameters.properties.mode.default, 'queue')
+  assert.equal(parameters.properties.wait.type, 'boolean')
+  assert.equal(parameters.properties.wait.default, false)
+  assert.equal(parameters.properties.timeout_ms.type, 'integer')
+  assert.equal(parameters.properties.timeout_ms.default, 120000)
+  assert.equal(parameters.properties.confirm.type, 'boolean')
+})
+
+test('session_interrupt requires only a session id plus confirm', () => {
+  const parameters = toolByName('session_interrupt').parameters
+
+  assert.deepEqual(parameters.required, ['session_id'])
+  assert.deepEqual(Object.keys(parameters.properties).sort(), ['confirm', 'session_id'])
+  assert.equal(parameters.properties.confirm.type, 'boolean')
 })

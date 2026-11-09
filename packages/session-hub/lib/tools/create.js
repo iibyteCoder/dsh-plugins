@@ -1,6 +1,7 @@
 import path from 'node:path'
 
 import { resolveModelSelection } from '../control.js'
+import { sendToSession } from '../messaging.js'
 import { recordOwner } from '../owner-index.js'
 import { requireController } from '../services.js'
 
@@ -51,6 +52,10 @@ export function createSessionCreateTool(ctx) {
         reasoning_effort: {
           type: 'string',
           description: 'Reasoning effort for the selected model. Requires model.',
+        },
+        initial_message: {
+          type: 'string',
+          description: 'Message to deliver to the new session right after creation (queued for its next turn).',
         },
       },
       required: [],
@@ -146,7 +151,41 @@ async function executeSessionCreate(ctx, rawArgs, exec) {
     }
   }
 
+  // Delivery happens after rename/model selection so the first turn already
+  // sees the intended title and model. Like the model step, a delivery problem
+  // is reported on its own line and never turns create into a failure.
+  const initialMessage = nonEmptyString(args.initial_message)
+  if (initialMessage !== '') {
+    const delivery = await deliverInitialMessage(ctx, sessionId, initialMessage, callerId)
+    lines.push(`- initial_message: ${delivery}`)
+  }
+
   return lines.join('\n')
+}
+
+/**
+ * Deliver `initial_message` to the freshly created session.
+ *
+ * @param {object} ctx - Cordis context provided by the DSH host.
+ * @param {string} sessionId - Newly created session.
+ * @param {string} message - Message text.
+ * @param {string} callerId - Session that created the new one (may be empty).
+ * @returns {Promise<string>} Label for the `initial_message` line.
+ */
+async function deliverInitialMessage(ctx, sessionId, message, callerId) {
+  let result
+  try {
+    result = await sendToSession(ctx, {
+      sessionId,
+      text: message,
+      mode: 'queue',
+      wait: false,
+      senderId: callerId,
+    })
+  } catch (error) {
+    result = { ok: false, text: `session-hub: send failed: ${errorMessage(error)}` }
+  }
+  return result.ok ? '已发送' : `失败（${result.text}）`
 }
 
 /**

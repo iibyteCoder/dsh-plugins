@@ -53,7 +53,23 @@ const catalog = {
 }
 
 function createCtx(overrides = {}) {
-  const calls = { create: [], rename: [], selectModel: [], modelCatalog: 0 }
+  const calls = {
+    create: [],
+    rename: [],
+    selectModel: [],
+    modelCatalog: 0,
+    resolveAgent: [],
+    followup: [],
+    steer: [],
+  }
+  const targetAgent = {
+    followup: async (message) => {
+      calls.followup.push(message)
+    },
+    steer: async (message) => {
+      calls.steer.push(message)
+    },
+  }
   const ctx = {
     sessionController: {
       create: async (request) => {
@@ -72,11 +88,15 @@ function createCtx(overrides = {}) {
         calls.modelCatalog += 1
         return catalog
       },
+      resolveAgent: async (sessionId) => {
+        calls.resolveAgent.push(sessionId)
+        return { agent: targetAgent }
+      },
     },
     workspaceRegistry: { list: async () => workspaces },
     ...overrides,
   }
-  return { ctx, calls }
+  return { ctx, calls, targetAgent }
 }
 
 function execWithCwd(cwd) {
@@ -265,6 +285,61 @@ test('session_create forwards agent_preset as agentPreset', async () => {
 
   assert.deepEqual(calls.create, [{ agentPreset: 'explorer' }])
   assert.match(text, /^- agentPreset: explorer$/m)
+})
+
+test('session_create queues initial_message on the new session', async () => {
+  const { ctx, calls } = createCtx()
+
+  const text = await runCreate({ initial_message: '  hello there  ' }, ctx)
+
+  assert.deepEqual(calls.resolveAgent, ['new-session'])
+  assert.equal(calls.followup.length, 1)
+  assert.equal(calls.steer.length, 0)
+
+  const message = calls.followup[0]
+  assert.equal(message.role, 'user')
+  assert.deepEqual(message.content, [
+    { type: 'text', text: `Agent ${callerId} sent a message:\n\nhello there` },
+  ])
+  assert.equal(message.source.kind, 'agent-message')
+  assert.equal(message.source.form, 'relay')
+  assert.equal(message.source.senderSessionId, callerId)
+  assert.match(text, /^- initial_message: 已发送$/m)
+})
+
+test('session_create appends initial_message after the model line', async () => {
+  const { ctx } = createCtx()
+
+  const text = await runCreate(
+    { title: 'Build the thing', model: 'model-a', provider: 'p1', initial_message: 'go' },
+    ctx,
+  )
+
+  assert.ok(text.indexOf('- model: p1/model-a') < text.indexOf('- initial_message: 已发送'))
+})
+
+test('session_create keeps the session when initial_message cannot be delivered', async () => {
+  const { ctx, calls } = createCtx()
+  ctx.sessionController.resolveAgent = async (sessionId) => {
+    calls.resolveAgent.push(sessionId)
+    return { error: { code: 'session/not-found', message: 'gone' } }
+  }
+
+  const text = await runCreate({ initial_message: 'hello' }, ctx)
+
+  assert.deepEqual(calls.create, [{}])
+  assert.deepEqual(calls.followup, [])
+  assert.match(text, /^已创建会话 new-session$/m)
+  assert.match(text, /^- initial_message: 失败（session-hub: send failed: session\/not-found）$/m)
+})
+
+test('session_create skips initial_message when it is blank', async () => {
+  const { ctx, calls } = createCtx()
+
+  const text = await runCreate({ initial_message: '   ' }, ctx)
+
+  assert.deepEqual(calls.resolveAgent, [])
+  assert.equal(text.includes('initial_message'), false)
 })
 
 test('session_create records ownership in the owner index', async () => {

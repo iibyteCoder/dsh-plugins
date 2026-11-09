@@ -12,7 +12,7 @@ test('apply tolerates a context without tools', () => {
   assert.doesNotThrow(() => apply({}))
 })
 
-test('apply registers the read, create and manage tools', () => {
+test('apply registers the read, create, manage and send tools', () => {
   const registered = []
   apply({ tools: { register: (tool) => registered.push(tool) } })
 
@@ -25,6 +25,8 @@ test('apply registers the read, create and manage tools', () => {
       'session_update',
       'session_close',
       'session_open',
+      'session_send',
+      'session_interrupt',
     ],
   )
   for (const tool of registered) {
