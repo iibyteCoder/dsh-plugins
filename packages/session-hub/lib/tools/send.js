@@ -1,79 +1,75 @@
 /**
- * Communication session tools: `session_send` and `session_interrupt`.
+ * Messaging session tools: `session_send`, `session_wake`, `session_wait`.
  *
- * Authorization is enforced here against the plugin's owner index before any
- * host action, mirroring the other mutating tools: a target the caller did not
- * create needs explicit `confirm: true`. Failures are rendered as
- * `session-hub: ...` text so a misbehaving call cannot take down the agent.
+ * The three tools are deliberately separate, mirroring the host's own
+ * vocabulary: send only delivers (it never wakes the target and never returns
+ * a reply), wake asks the target to process the message now, and wait only
+ * waits for idle. Authorization is enforced here against the plugin's owner
+ * index before any host action; failures are rendered as `session-hub: ...`
+ * text so a misbehaving call cannot take down the agent.
  */
 import { confirmError, confirmRequired, ownerOf } from '../control.js'
-import { readArchivedIds, sendToSession } from '../messaging.js'
-import { requireController } from '../services.js'
+import { clampTimeout, deliver, readArchivedIds, waitForIdle, wake } from '../messaging.js'
 
 const RENDER_TEXT = (_args, value) => [{ type: 'text', text: String(value ?? '') }]
 
+const SELF_TARGET_ERROR = 'session-hub: SELF_TARGET: a session cannot send a message to itself'
+
 const SESSION_SEND_DESCRIPTION = [
-  'Send a message from the calling session to another DeepSeek Harness session.',
-  'mode "queue" (default) queues it for the next turn; mode "steer" delivers it at the next step.',
-  'wait: true waits for the target to become idle and returns its latest reply.',
-  'Sending to a session the caller did not create requires confirm: true; sending to itself is refused.',
+  'Deliver a message to another DeepSeek Harness session without waking it.',
+  'The message is injected and the target is not started, and no reply is returned.',
+  'Use session_wake when the target should process the message now.',
+  'Sending to itself is refused.',
 ].join(' ')
 
-const SESSION_INTERRUPT_DESCRIPTION = [
-  'Interrupt the current turn of a DeepSeek Harness session, keeping its inbox.',
-  'Interrupting a session the caller did not create requires confirm: true.',
+const SESSION_SEND_DESCRIPTION_OWNED = [
+  SESSION_SEND_DESCRIPTION,
+  'Sending to a session the caller did not create requires confirm: true.',
+].join(' ')
+
+const SESSION_WAKE_DESCRIPTION = [
+  'Ask another DeepSeek Harness session to process a message now.',
+  'A running session is steered at its next step boundary; an idle session gets a follow-up turn.',
+  'Sending to itself is refused.',
+].join(' ')
+
+const SESSION_WAKE_DESCRIPTION_OWNED = [
+  SESSION_WAKE_DESCRIPTION,
+  'Waking a session the caller did not create requires confirm: true.',
+].join(' ')
+
+const SESSION_WAIT_DESCRIPTION = [
+  'Wait for another DeepSeek Harness session to become idle and return its latest assistant reply (truncated to 2000 characters).',
+  'An archived session and a session that is not loaded return immediately. This tool needs no confirmation.',
 ].join(' ')
 
 /**
- * Build the communication session tools bound to a host context.
+ * Build the messaging session tools bound to a host context.
  *
- * The permission mode is accepted for a uniform factory signature; send and
- * interrupt keep their existing ownership checks in every mode for now.
+ * The permission mode is normalized by `lib/config.js` when the plugin is
+ * applied. Only `session_send` and `session_wake` expose `confirm`, and only
+ * in owned mode; `session_wait` is read-only and never asks for confirmation.
  *
  * @param {object} ctx - Cordis context provided by the DSH host.
  * @param {{permissionMode?: 'permissive' | 'owned'}} [options]
  * @returns {object[]} Tool definitions ready for `ctx.tools.register`.
  */
-export function createSendTools(ctx, { permissionMode } = {}) {
-  return [createSessionSendTool(ctx), createSessionInterruptTool(ctx)]
+export function createSendTools(ctx, { permissionMode = 'permissive' } = {}) {
+  return [
+    createSessionSendTool(ctx, permissionMode),
+    createSessionWakeTool(ctx, permissionMode),
+    createSessionWaitTool(ctx),
+  ]
 }
 
-function createSessionSendTool(ctx) {
+function createSessionSendTool(ctx, permissionMode) {
+  const owned = permissionMode === 'owned'
   return {
     name: 'session_send',
-    description: SESSION_SEND_DESCRIPTION,
+    description: owned ? SESSION_SEND_DESCRIPTION_OWNED : SESSION_SEND_DESCRIPTION,
     parameters: {
       type: 'object',
-      properties: {
-        session_id: {
-          type: 'string',
-          description: 'Session id to send the message to.',
-        },
-        message: {
-          type: 'string',
-          description: 'Message text to deliver.',
-        },
-        mode: {
-          type: 'string',
-          description: 'queue delivers on the next turn; steer delivers at the next step.',
-          enum: ['queue', 'steer'],
-          default: 'queue',
-        },
-        wait: {
-          type: 'boolean',
-          description: 'Wait for the target session to become idle and return its latest reply.',
-          default: false,
-        },
-        timeout_ms: {
-          type: 'integer',
-          description: 'Maximum wait in milliseconds when wait is true (default 120000, clamped to 1000..600000).',
-          default: 120000,
-        },
-        confirm: {
-          type: 'boolean',
-          description: 'Must be true to send to a session the caller did not create.',
-        },
-      },
+      properties: messageProperties(owned, 'send to'),
       required: ['session_id', 'message'],
     },
     output: {
@@ -82,7 +78,7 @@ function createSessionSendTool(ctx) {
     },
     async execute(args, exec) {
       try {
-        return await executeSessionSend(ctx, args, exec)
+        return await executeSessionSend(ctx, args, exec, permissionMode)
       } catch (error) {
         return toErrorText(error)
       }
@@ -90,20 +86,45 @@ function createSessionSendTool(ctx) {
   }
 }
 
-function createSessionInterruptTool(ctx) {
+function createSessionWakeTool(ctx, permissionMode) {
+  const owned = permissionMode === 'owned'
   return {
-    name: 'session_interrupt',
-    description: SESSION_INTERRUPT_DESCRIPTION,
+    name: 'session_wake',
+    description: owned ? SESSION_WAKE_DESCRIPTION_OWNED : SESSION_WAKE_DESCRIPTION,
+    parameters: {
+      type: 'object',
+      properties: messageProperties(owned, 'wake'),
+      required: ['session_id', 'message'],
+    },
+    output: {
+      schema: { type: 'string' },
+      render: RENDER_TEXT,
+    },
+    async execute(args, exec) {
+      try {
+        return await executeSessionWake(ctx, args, exec, permissionMode)
+      } catch (error) {
+        return toErrorText(error)
+      }
+    },
+  }
+}
+
+function createSessionWaitTool(ctx) {
+  return {
+    name: 'session_wait',
+    description: SESSION_WAIT_DESCRIPTION,
     parameters: {
       type: 'object',
       properties: {
         session_id: {
           type: 'string',
-          description: 'Session id to interrupt.',
+          description: 'Session id to wait for.',
         },
-        confirm: {
-          type: 'boolean',
-          description: 'Must be true to interrupt a session the caller did not create.',
+        timeout_ms: {
+          type: 'integer',
+          description: 'Maximum wait in milliseconds (default 120000, clamped to 1000..600000).',
+          default: 120000,
         },
       },
       required: ['session_id'],
@@ -112,9 +133,9 @@ function createSessionInterruptTool(ctx) {
       schema: { type: 'string' },
       render: RENDER_TEXT,
     },
-    async execute(args, exec) {
+    async execute(args) {
       try {
-        return await executeSessionInterrupt(ctx, args, exec)
+        return await executeSessionWait(ctx, args)
       } catch (error) {
         return toErrorText(error)
       }
@@ -122,7 +143,35 @@ function createSessionInterruptTool(ctx) {
   }
 }
 
-async function executeSessionSend(ctx, rawArgs, exec) {
+/**
+ * The shared parameter set of send and wake; `confirm` only exists in owned
+ * mode.
+ *
+ * @param {boolean} owned
+ * @param {string} verb - Used in the confirm description.
+ * @returns {object}
+ */
+function messageProperties(owned, verb) {
+  const properties = {
+    session_id: {
+      type: 'string',
+      description: 'Session id to target.',
+    },
+    message: {
+      type: 'string',
+      description: 'Message text to deliver.',
+    },
+  }
+  if (owned) {
+    properties.confirm = {
+      type: 'boolean',
+      description: `Must be true to ${verb} a session the caller did not create.`,
+    }
+  }
+  return properties
+}
+
+async function executeSessionSend(ctx, rawArgs, exec, permissionMode) {
   const args = rawArgs ?? {}
 
   const sessionId = nonEmptyString(args.session_id)
@@ -130,53 +179,81 @@ async function executeSessionSend(ctx, rawArgs, exec) {
   const message = nonEmptyString(args.message)
   if (message === '') return 'session-hub: message is required'
 
-  const callerId = callerIdOf(exec)
-  // A session messaging itself has no meaningful turn to wake; refuse before
-  // any ownership lookup or agent resolution.
-  if (sessionId === callerId) {
-    return 'session-hub: SELF_TARGET: a session cannot send a message to itself'
-  }
+  const target = await authorizedTarget(ctx, sessionId, args, exec, permissionMode)
+  if (target.error !== undefined) return target.error
 
-  const ownerId = await ownerOf(sessionId)
-  if (confirmRequired(ownerId, callerId) && args.confirm !== true) {
-    return confirmError(sessionId)
-  }
-
-  if (readArchivedIds(ctx).includes(sessionId)) {
-    return `session-hub: SESSION_ARCHIVED: session "${sessionId}" is archived; call session_open first`
-  }
-
-  const result = await sendToSession(ctx, {
-    sessionId,
-    text: message,
-    mode: args.mode === 'steer' ? 'steer' : 'queue',
-    wait: args.wait === true,
-    timeoutMs: args.timeout_ms,
-    senderId: callerId,
-  })
+  const result = await deliver(ctx, { sessionId, text: message, senderId: target.callerId })
   return result.text
 }
 
-async function executeSessionInterrupt(ctx, rawArgs, exec) {
+async function executeSessionWake(ctx, rawArgs, exec, permissionMode) {
+  const args = rawArgs ?? {}
+
+  const sessionId = nonEmptyString(args.session_id)
+  if (sessionId === '') return 'session-hub: session_id is required'
+  const message = nonEmptyString(args.message)
+  if (message === '') return 'session-hub: message is required'
+
+  const target = await authorizedTarget(ctx, sessionId, args, exec, permissionMode)
+  if (target.error !== undefined) return target.error
+
+  const result = await wake(ctx, { sessionId, text: message, senderId: target.callerId })
+  return result.text
+}
+
+async function executeSessionWait(ctx, rawArgs) {
   const args = rawArgs ?? {}
 
   const sessionId = nonEmptyString(args.session_id)
   if (sessionId === '') return 'session-hub: session_id is required'
 
+  const timeoutMs = clampTimeout(args.timeout_ms)
+  const result = await waitForIdle(ctx, sessionId, timeoutMs)
+
+  if (result.status === 'archived') return `会话 ${sessionId} 已归档，不会运行`
+  if (result.status === 'cold') return `会话 ${sessionId} 空闲（未加载）`
+  if (result.status === 'timeout') {
+    return `session-hub: WAIT_TIMEOUT: session "${sessionId}" did not become idle within ${timeoutMs}ms`
+  }
+
+  const idle = `会话 ${sessionId} 已空闲`
+  return result.reply === '' ? idle : `${idle}\n- reply: ${result.reply}`
+}
+
+/**
+ * Validate the parts shared by send and wake, in the documented order:
+ * self-target, ownership (owned mode only), archive gate.
+ *
+ * @param {object} ctx - Cordis context provided by the DSH host.
+ * @param {string} sessionId - Already validated non-empty target.
+ * @param {object} args - Raw tool arguments.
+ * @param {object} exec - Tool execution context.
+ * @param {'permissive' | 'owned'} permissionMode
+ * @returns {Promise<{sessionId: string, callerId: string, error?: undefined} | {error: string}>}
+ */
+async function authorizedTarget(ctx, sessionId, args, exec, permissionMode) {
   const callerId = callerIdOf(exec)
-  const ownerId = await ownerOf(sessionId)
-  if (confirmRequired(ownerId, callerId) && args.confirm !== true) {
-    return confirmError(sessionId)
+
+  // A session messaging itself has no meaningful turn to wake; refuse before
+  // any ownership lookup or agent resolution.
+  if (sessionId === callerId) return { error: SELF_TARGET_ERROR }
+
+  if (permissionMode === 'owned') {
+    const ownerId = await ownerOf(sessionId)
+    // `confirm` only counts when it is the boolean true; "true", 1 and the like
+    // must not be accepted as authorization.
+    if (confirmRequired(ownerId, callerId) && args.confirm !== true) {
+      return { error: confirmError(sessionId) }
+    }
   }
 
-  const controller = requireController(ctx)
-  try {
-    await controller.cancel({ sessionId })
-  } catch (error) {
-    return `session-hub: interrupt failed: ${errorMessage(error)}`
+  if (readArchivedIds(ctx).includes(sessionId)) {
+    return {
+      error: `session-hub: SESSION_ARCHIVED: session "${sessionId}" is archived; call session_open first`,
+    }
   }
 
-  return `已打断会话 ${sessionId}`
+  return { sessionId, callerId }
 }
 
 function callerIdOf(exec) {

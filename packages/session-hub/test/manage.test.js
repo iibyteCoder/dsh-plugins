@@ -341,33 +341,33 @@ test('session_close closes a session created by the caller without confirmation'
   assert.equal(text, '已关闭会话 child（已归档，可用 session_open 恢复）')
 })
 
-test('session_close requires confirmation to close the calling session', async () => {
+test('session_close refuses to close the calling session in owned mode', async () => {
   await recordOwner(callerId, 'creator')
   const { ctx, calls } = createCtx()
 
   const text = await run('session_close', { session_id: callerId }, ctx)
 
-  assert.equal(text, confirmErrorText(callerId))
+  assert.equal(text, selfCloseErrorText)
   assert.deepEqual(calls.archiveSession, [])
 })
 
-test('session_close closes the calling session with confirm: true', async () => {
+test('session_close has no confirm escape hatch for self-close in owned mode', async () => {
   await recordOwner(callerId, 'creator')
   const { ctx, calls } = createCtx()
 
   const text = await run('session_close', { session_id: callerId, confirm: true }, ctx)
 
-  assert.deepEqual(calls.archiveSession, [{ sessionId: callerId, stopActivity: true }])
-  assert.equal(text, `已关闭会话 ${callerId}（已归档，可用 session_open 恢复）`)
+  assert.equal(text, selfCloseErrorText)
+  assert.deepEqual(calls.archiveSession, [])
 })
 
 test('session_close does not accept the string "true" as confirmation', async () => {
-  await recordOwner(callerId, 'creator')
+  await recordOwner('target', 'other')
   const { ctx, calls } = createCtx()
 
-  const text = await run('session_close', { session_id: callerId, confirm: 'true' }, ctx)
+  const text = await run('session_close', { session_id: 'target', confirm: 'true' }, ctx)
 
-  assert.equal(text, confirmErrorText(callerId))
+  assert.equal(text, confirmErrorText('target'))
   assert.deepEqual(calls.archiveSession, [])
 })
 

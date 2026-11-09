@@ -4,7 +4,7 @@
  * Host plugin. Tools are registered incrementally; this version exposes the
  * read-only `session_list` / `session_get` tools, lifecycle tools
  * (`session_create`, `session_update`, `session_close`, `session_open`) and
- * communication tools (`session_send`, `session_interrupt`).
+ * messaging tools (`session_send`, `session_wake`, `session_wait`).
  */
 import { resolvePermissionMode } from './config.js'
 import { createSessionCreateTool } from './tools/create.js'

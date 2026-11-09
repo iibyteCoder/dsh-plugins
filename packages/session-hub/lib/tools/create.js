@@ -1,7 +1,7 @@
 import path from 'node:path'
 
 import { resolveModelSelection } from '../control.js'
-import { sendToSession } from '../messaging.js'
+import { wake } from '../messaging.js'
 import { recordOwner } from '../owner-index.js'
 import { requireController, serviceOf } from '../services.js'
 
@@ -9,6 +9,7 @@ const RENDER_TEXT = (_args, value) => [{ type: 'text', text: String(value ?? '')
 
 const SESSION_CREATE_DESCRIPTION = [
   'Create a new DeepSeek Harness session, optionally inside a workspace or at a specific cwd, and record the calling session as its owner.',
+  'The required message is delivered to the new session as its initial task, which starts it immediately.',
   'Returns the new session id.',
 ].join(' ')
 
@@ -57,12 +58,12 @@ export function createSessionCreateTool(ctx, { permissionMode } = {}) {
           type: 'string',
           description: 'Reasoning effort for the selected model. Requires model.',
         },
-        initial_message: {
+        message: {
           type: 'string',
-          description: 'Message to deliver to the new session right after creation (queued for its next turn).',
+          description: 'Initial task delivered to the new session; it starts the session immediately.',
         },
       },
-      required: [],
+      required: ['message'],
     },
     output: {
       schema: { type: 'string' },
@@ -81,6 +82,9 @@ export function createSessionCreateTool(ctx, { permissionMode } = {}) {
 async function executeSessionCreate(ctx, rawArgs, exec) {
   const args = rawArgs ?? {}
   const controller = requireController(ctx)
+
+  const message = nonEmptyString(args.message)
+  if (message === '') return 'session-hub: message is required'
 
   const workspaceArg = nonEmptyString(args.workspace)
   const cwdArg = nonEmptyString(args.cwd)
@@ -155,41 +159,36 @@ async function executeSessionCreate(ctx, rawArgs, exec) {
     }
   }
 
-  // Delivery happens after rename/model selection so the first turn already
-  // sees the intended title and model. Like the model step, a delivery problem
-  // is reported on its own line and never turns create into a failure.
-  const initialMessage = nonEmptyString(args.initial_message)
-  if (initialMessage !== '') {
-    const delivery = await deliverInitialMessage(ctx, sessionId, initialMessage, callerId)
-    lines.push(`- initial_message: ${delivery}`)
-  }
+  // The initial task is delivered after rename/model selection so the first
+  // turn already sees the intended title and model. Like the model step, a
+  // delivery problem is reported on its own line and never turns create into a
+  // failure.
+  const delivery = await deliverInitialTask(ctx, sessionId, message, callerId)
+  lines.push(`- started: ${delivery}`)
 
   return lines.join('\n')
 }
 
 /**
- * Deliver `initial_message` to the freshly created session.
+ * Deliver the initial task to the freshly created session.
+ *
+ * Wake semantics are used (`followup` on the idle new session) so the session
+ * starts working immediately instead of waiting for a later turn.
  *
  * @param {object} ctx - Cordis context provided by the DSH host.
  * @param {string} sessionId - Newly created session.
- * @param {string} message - Message text.
+ * @param {string} message - Initial task text.
  * @param {string} callerId - Session that created the new one (may be empty).
- * @returns {Promise<string>} Label for the `initial_message` line.
+ * @returns {Promise<string>} Label for the `started` line.
  */
-async function deliverInitialMessage(ctx, sessionId, message, callerId) {
+async function deliverInitialTask(ctx, sessionId, message, callerId) {
   let result
   try {
-    result = await sendToSession(ctx, {
-      sessionId,
-      text: message,
-      mode: 'queue',
-      wait: false,
-      senderId: callerId,
-    })
+    result = await wake(ctx, { sessionId, text: message, senderId: callerId })
   } catch (error) {
     result = { ok: false, text: `session-hub: send failed: ${errorMessage(error)}` }
   }
-  return result.ok ? '已发送' : `失败（${result.text}）`
+  return result.ok ? '已投递初始任务' : `失败（${result.text}）`
 }
 
 /**

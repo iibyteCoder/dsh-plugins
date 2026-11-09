@@ -32,7 +32,8 @@ const SESSION_CLOSE_DESCRIPTION = [
 
 const SESSION_CLOSE_DESCRIPTION_OWNED = [
   'Close a DeepSeek Harness session by archiving it and stopping its activity.',
-  'Restore it later with session_open. Closing the calling session or a session the caller did not create requires confirm: true.',
+  'Restore it later with session_open. The calling session cannot close itself.',
+  'Closing a session the caller did not create requires confirm: true.',
 ].join(' ')
 
 const SESSION_OPEN_DESCRIPTION = [
@@ -122,7 +123,7 @@ function createSessionCloseTool(ctx, permissionMode) {
   if (owned) {
     properties.confirm = {
       type: 'boolean',
-      description: 'Must be true to close the calling session or a session the caller did not create.',
+      description: 'Must be true to close a session the caller did not create.',
     }
   }
 
@@ -242,14 +243,12 @@ async function executeSessionClose(ctx, rawArgs, exec, permissionMode) {
   if (sessionId === '') return 'session-hub: session_id is required'
 
   const callerId = callerIdOf(exec)
-  // Self-close is decided first, before any confirmation check. Permissive
-  // mode has no confirm escape hatch, so the call is refused outright; owned
-  // mode keeps the existing explicit-confirmation path.
+  // Self-close is refused outright in both modes, before any confirmation
+  // check: owned mode's `confirm: true` is not an escape hatch for it.
   const isSelf = callerId !== '' && sessionId === callerId
-  if (isSelf) {
-    if (permissionMode === 'permissive') return SELF_CLOSE_ERROR
-    if (args.confirm !== true) return confirmError(sessionId)
-  } else if (permissionMode === 'owned') {
+  if (isSelf) return SELF_CLOSE_ERROR
+
+  if (permissionMode === 'owned') {
     const ownerId = await ownerOf(sessionId)
     if (confirmRequired(ownerId, callerId) && args.confirm !== true) {
       return confirmError(sessionId)

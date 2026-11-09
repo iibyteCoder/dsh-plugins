@@ -18,7 +18,7 @@ function register(config) {
   return registered
 }
 
-test('apply registers the read, create, manage and send tools', () => {
+test('apply registers the read, create, manage and messaging tools', () => {
   const registered = register()
 
   assert.deepEqual(
@@ -31,7 +31,8 @@ test('apply registers the read, create, manage and send tools', () => {
       'session_close',
       'session_open',
       'session_send',
-      'session_interrupt',
+      'session_wake',
+      'session_wait',
     ],
   )
   for (const tool of registered) {
@@ -40,29 +41,35 @@ test('apply registers the read, create, manage and send tools', () => {
   }
 })
 
-test('apply defaults to the permissive manage schemas', () => {
+test('apply defaults to the permissive manage and messaging schemas', () => {
   const registered = register()
   const byName = (name) => registered.find((tool) => tool.name === name)
 
   assert.equal('confirm' in byName('session_update').parameters.properties, false)
   assert.equal('confirm' in byName('session_close').parameters.properties, false)
+  assert.equal('confirm' in byName('session_send').parameters.properties, false)
+  assert.equal('confirm' in byName('session_wake').parameters.properties, false)
+  assert.equal('confirm' in byName('session_wait').parameters.properties, false)
 })
 
-test('apply registers the owned manage schemas when permissionMode is "owned"', () => {
+test('apply registers the owned schemas when permissionMode is "owned"', () => {
   const registered = register({ permissionMode: 'owned' })
   const byName = (name) => registered.find((tool) => tool.name === name)
 
   assert.equal(byName('session_update').parameters.properties.confirm.type, 'boolean')
   assert.equal(byName('session_close').parameters.properties.confirm.type, 'boolean')
+  assert.equal(byName('session_send').parameters.properties.confirm.type, 'boolean')
+  assert.equal(byName('session_wake').parameters.properties.confirm.type, 'boolean')
+  assert.equal('confirm' in byName('session_wait').parameters.properties, false)
 })
 
 test('apply treats an invalid permissionMode as permissive', () => {
   for (const permissionMode of ['OWNED', 'admin', true]) {
     const registered = register({ permissionMode })
-    const update = registered.find((tool) => tool.name === 'session_update')
-    const close = registered.find((tool) => tool.name === 'session_close')
+    const byName = (name) => registered.find((tool) => tool.name === name)
 
-    assert.equal('confirm' in update.parameters.properties, false)
-    assert.equal('confirm' in close.parameters.properties, false)
+    for (const name of ['session_update', 'session_close', 'session_send', 'session_wake']) {
+      assert.equal('confirm' in byName(name).parameters.properties, false, `${name} (${permissionMode})`)
+    }
   }
 })

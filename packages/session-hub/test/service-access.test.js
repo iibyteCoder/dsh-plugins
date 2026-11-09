@@ -100,12 +100,17 @@ function createHostServices({ agent: agentOverrides, ...overrides } = {}) {
     create: [],
     rename: [],
     resolveAgent: [],
+    inject: [],
     followup: [],
     steer: [],
     archiveSession: [],
     unarchiveSession: [],
   }
   const agent = {
+    status: 'idle',
+    inject: async (message) => {
+      calls.inject.push(message)
+    },
     followup: async (message) => {
       calls.followup.push(message)
     },
@@ -208,7 +213,8 @@ test('apply mounts every tool on a proxy context that guards host services', () 
       'session_close',
       'session_open',
       'session_send',
-      'session_interrupt',
+      'session_wake',
+      'session_wait',
     ],
   )
 })
@@ -246,15 +252,17 @@ test('session_create resolves the workspace and records the owner through ctx.ge
 
   const text = assertNoInjectFailure(
     await toolByName([createSessionCreateTool(ctx)], 'session_create').execute(
-      { workspace: 'Workspace One' },
+      { workspace: 'Workspace One', message: 'build it' },
       exec,
     ),
   )
 
   assert.deepEqual(calls.create, [{ workspaceId: 'ws-alpha' }])
+  assert.equal(calls.followup.length, 1)
   assert.match(text, /^已创建会话 new-session$/m)
   assert.match(text, /^- workspace: Workspace One$/m)
   assert.match(text, /^- owner: self$/m)
+  assert.match(text, /^- started: 已投递初始任务$/m)
 
   const owners = await readOwnerIndex()
   assert.equal(owners['new-session'].ownerSessionId, callerId)
@@ -274,7 +282,7 @@ test('session_close archives the session through ctx.get', async () => {
   assert.match(text, /^已关闭会话 target/m)
 })
 
-test('session_send delivers the message through ctx.get', async () => {
+test('session_send injects the message through ctx.get', async () => {
   await recordOwner('target', callerId)
   const { services, calls } = createHostServices()
   const { ctx } = createHostContext(services)
@@ -287,30 +295,51 @@ test('session_send delivers the message through ctx.get', async () => {
   )
 
   assert.deepEqual(calls.resolveAgent, ['target'])
-  assert.equal(calls.followup.length, 1)
-  assert.equal(calls.followup[0].role, 'user')
-  assert.deepEqual(calls.followup[0].content, [
+  assert.equal(calls.inject.length, 1)
+  assert.equal(calls.followup.length, 0)
+  assert.equal(calls.steer.length, 0)
+  assert.equal(calls.inject[0].role, 'user')
+  assert.deepEqual(calls.inject[0].content, [
     { type: 'text', text: `Agent ${callerId} sent a message:\n\nhello there` },
   ])
-  assert.equal(calls.followup[0].source.senderSessionId, callerId)
-  assert.match(text, /已向会话 target 发送消息/)
+  assert.equal(calls.inject[0].source.senderSessionId, callerId)
+  assert.match(text, /已向会话 target 投递消息（不唤醒）/)
 })
 
-test('session_send with wait reads the live snapshot through ctx.get', async () => {
+test('session_wake steers the running agent through ctx.get', async () => {
   await recordOwner('target', callerId)
-  const { services } = createHostServices({
-    agent: { whenIdle: async () => {} },
-    sessions: { get: (sessionId) => (sessionId === 'target' ? { snapshotEvents: () => [reply] } : undefined) },
-  })
+  const { services, calls } = createHostServices({ agent: { status: 'running' } })
   const { ctx } = createHostContext(services)
 
   const text = assertNoInjectFailure(
-    await toolByName(createSendTools(ctx), 'session_send').execute(
-      { session_id: 'target', message: 'are you there?', wait: true, timeout_ms: 1000 },
+    await toolByName(createSendTools(ctx), 'session_wake').execute(
+      { session_id: 'target', message: 'hurry' },
       exec,
     ),
   )
 
-  assert.match(text, /已向会话 target 发送消息/)
+  assert.equal(calls.steer.length, 1)
+  assert.equal(calls.followup.length, 0)
+  assert.match(text, /已请求会话 target 处理消息（running → steer）/)
+})
+
+test('session_wait reads the live snapshot through ctx.get', async () => {
+  const waitAgent = { status: 'idle', whenIdle: async () => {} }
+  const { services } = createHostServices({
+    agents: { get: (sessionId) => (sessionId === 'target' ? waitAgent : undefined) },
+    sessions: {
+      get: (sessionId) => (sessionId === 'target' ? { snapshotEvents: () => [reply] } : undefined),
+    },
+  })
+  const { ctx } = createHostContext(services)
+
+  const text = assertNoInjectFailure(
+    await toolByName(createSendTools(ctx), 'session_wait').execute(
+      { session_id: 'target', timeout_ms: 1000 },
+      exec,
+    ),
+  )
+
+  assert.match(text, /^会话 target 已空闲$/m)
   assert.match(text, /- reply: on it$/)
 })

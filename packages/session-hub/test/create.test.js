@@ -113,15 +113,18 @@ function execWithCwd(cwd) {
 const defaultExec = execWithCwd()
 
 async function runCreate(args, ctx = createCtx().ctx, exec = defaultExec) {
-  return createSessionCreateTool(ctx).execute(args, exec)
+  // Every valid create carries the required initial task; tests that exercise
+  // the missing-message path call the tool directly.
+  return createSessionCreateTool(ctx).execute({ message: 'build the thing', ...args }, exec)
 }
 
-test('session_create without options sends an empty request', async () => {
+test('session_create sends an empty create request for the required task only', async () => {
   const { ctx, calls } = createCtx()
 
   const text = await runCreate({}, ctx)
 
   assert.deepEqual(calls.create, [{}])
+  assert.equal(calls.followup.length, 1)
   assert.equal(
     text,
     [
@@ -130,6 +133,7 @@ test('session_create without options sends an empty request', async () => {
       '- cwd: -',
       '- agentPreset: -',
       '- owner: self',
+      '- started: 已投递初始任务',
     ].join('\n'),
   )
 })
@@ -292,10 +296,10 @@ test('session_create forwards agent_preset as agentPreset', async () => {
   assert.match(text, /^- agentPreset: explorer$/m)
 })
 
-test('session_create queues initial_message on the new session', async () => {
+test('session_create delivers the required message as the initial task', async () => {
   const { ctx, calls } = createCtx()
 
-  const text = await runCreate({ initial_message: '  hello there  ' }, ctx)
+  const text = await runCreate({ message: '  hello there  ' }, ctx)
 
   assert.deepEqual(calls.resolveAgent, ['new-session'])
   assert.equal(calls.followup.length, 1)
@@ -309,42 +313,48 @@ test('session_create queues initial_message on the new session', async () => {
   assert.equal(message.source.kind, 'agent-message')
   assert.equal(message.source.form, 'relay')
   assert.equal(message.source.senderSessionId, callerId)
-  assert.match(text, /^- initial_message: 已发送$/m)
+  assert.match(text, /^- started: 已投递初始任务$/m)
 })
 
-test('session_create appends initial_message after the model line', async () => {
+test('session_create starts the new session immediately after rename and model selection', async () => {
   const { ctx } = createCtx()
 
   const text = await runCreate(
-    { title: 'Build the thing', model: 'model-a', provider: 'p1', initial_message: 'go' },
+    { title: 'Build the thing', model: 'model-a', provider: 'p1', message: 'go' },
     ctx,
   )
 
-  assert.ok(text.indexOf('- model: p1/model-a') < text.indexOf('- initial_message: 已发送'))
+  assert.ok(text.indexOf('- model: p1/model-a') < text.indexOf('- started: 已投递初始任务'))
 })
 
-test('session_create keeps the session when initial_message cannot be delivered', async () => {
+test('session_create keeps the session when the initial task cannot be delivered', async () => {
   const { ctx, calls } = createCtx()
   ctx.sessionController.resolveAgent = async (sessionId) => {
     calls.resolveAgent.push(sessionId)
     return { error: { code: 'session/not-found', message: 'gone' } }
   }
 
-  const text = await runCreate({ initial_message: 'hello' }, ctx)
+  const text = await runCreate({ message: 'hello' }, ctx)
 
   assert.deepEqual(calls.create, [{}])
   assert.deepEqual(calls.followup, [])
   assert.match(text, /^已创建会话 new-session$/m)
-  assert.match(text, /^- initial_message: 失败（session-hub: send failed: session\/not-found）$/m)
+  assert.match(text, /^- started: 失败（session-hub: send failed: session\/not-found）$/m)
 })
 
-test('session_create skips initial_message when it is blank', async () => {
+test('session_create requires a non-empty message', async () => {
   const { ctx, calls } = createCtx()
 
-  const text = await runCreate({ initial_message: '   ' }, ctx)
-
+  assert.equal(
+    await createSessionCreateTool(ctx).execute({}, defaultExec),
+    'session-hub: message is required',
+  )
+  assert.equal(
+    await createSessionCreateTool(ctx).execute({ message: '   ' }, defaultExec),
+    'session-hub: message is required',
+  )
+  assert.deepEqual(calls.create, [])
   assert.deepEqual(calls.resolveAgent, [])
-  assert.equal(text.includes('initial_message'), false)
 })
 
 test('session_create records ownership in the owner index', async () => {
@@ -415,6 +425,14 @@ test('session_create schema stays within the supported keyword subset', () => {
     assert.equal('minimum' in schema, false, `session_create.${name}: "minimum" is not supported`)
     assert.equal('maximum' in schema, false, `session_create.${name}: "maximum" is not supported`)
   }
+})
+
+test('session_create requires a message and no longer takes initial_message', () => {
+  const parameters = createSessionCreateTool(createCtx().ctx).parameters
+
+  assert.deepEqual(parameters.required, ['message'])
+  assert.equal(parameters.properties.message.type, 'string')
+  assert.equal('initial_message' in parameters.properties, false)
 })
 
 function escapeRegExp(value) {
