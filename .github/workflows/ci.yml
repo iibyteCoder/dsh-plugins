@@ -26,4 +26,8 @@ jobs:
           # No dependencies to cache, and pnpm is intentionally not installed.
           package-manager-cache: false
       - name: Run tests
-        run: node --test packages/session-hub/test/
+        # Run inside the package so Node's default test discovery picks up the
+        # same files as `node --test` does locally. Passing the test directory
+        # as an argument is not portable: Node 22.23 treats it as a module.
+        working-directory: packages/session-hub
+        run: node --test

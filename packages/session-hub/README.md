@@ -137,15 +137,9 @@ cd D:\myprojects\projects\dsh-plugins\packages\session-hub
 node --test
 ```
 
-在仓库根目录运行：
-
-```powershell
-node --test packages/session-hub/test/
-```
-
 当前共 127 个测试，覆盖工具注册、schema 约束、所有权索引、权限确认、列表/详情格式化、消息投递与打断等行为。测试使用伪造的宿主 context，不依赖真实 DSH 进程，也不需要安装依赖。
 
-CI 在 `ubuntu-latest` 上用 Node 20 和 22 执行 `node --test packages/session-hub/test/`。
+CI 在 `ubuntu-latest` 上用 Node 20 和 22，在包目录内执行 `node --test`。
 
 ## 已知限制
 

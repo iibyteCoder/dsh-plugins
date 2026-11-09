@@ -72,19 +72,13 @@ cd packages/session-hub
 node --test
 ```
 
-在仓库根目录运行：
-
-```bash
-node --test packages/session-hub/test/
-```
-
 或使用 pnpm 递归执行各包的 `test` 脚本：
 
 ```bash
 pnpm test
 ```
 
-CI（`.github/workflows/ci.yml`）在 `ubuntu-latest` 上使用 Node 20 与 22 运行 `node --test packages/session-hub/test/`，不执行依赖安装。
+CI（`.github/workflows/ci.yml`）在 `ubuntu-latest` 上使用 Node 20 与 22，在 `packages/session-hub` 目录内执行 `node --test`，不执行依赖安装。
 
 ## 许可证
 
