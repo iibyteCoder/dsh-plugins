@@ -9,7 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import { resolvePermissionMode } from './config.js'
 import { createTools } from './tools/registry.js'
-import type { ToolOptions } from './shared/types.js'
+import type { PermissionConfig, ToolOptions } from './shared/types.js'
 
 export const name = 'session-hub'
 
@@ -21,7 +21,7 @@ export const inject = ['tools']
  * @param ctx - Cordis context provided by the DSH host.
  * @param config - Plugin config (`permissionMode` is the only field read).
  */
-export function apply(ctx: Context, config?: unknown): void {
+export function apply(ctx: Context, config?: PermissionConfig): void {
   const tools = ctx?.tools
   if (tools === undefined || typeof tools.register !== 'function') return
 

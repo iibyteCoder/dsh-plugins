@@ -3,12 +3,24 @@ import { describe, test } from 'node:test'
 
 import { DEFAULT_PERMISSION_MODE, resolvePermissionMode } from '../src/config.js'
 import { PermissionMode } from '../src/shared/enums.js'
+import type { PermissionConfig } from '../src/shared/types.js'
+
+/**
+ * Resolve a value a JavaScript host could pass at runtime.
+ *
+ * `apply` hands the raw plugin config to the resolver, so the resolver must
+ * stay total for shapes the TypeScript signature cannot express (`null`,
+ * extra fields, wrong types); those calls cross the typed boundary here.
+ */
+function resolveRaw(config: unknown): PermissionMode {
+  return resolvePermissionMode(config as PermissionConfig | undefined)
+}
 
 describe('config', () => {
   test('permission mode defaults to permissive', () => {
     assert.equal(DEFAULT_PERMISSION_MODE, PermissionMode.Permissive)
     for (const config of [undefined, null, {}, { permissionMode: undefined }]) {
-      assert.equal(resolvePermissionMode(config), PermissionMode.Permissive)
+      assert.equal(resolveRaw(config), PermissionMode.Permissive)
     }
   })
 
@@ -32,7 +44,7 @@ describe('config', () => {
   })
 
   test('only the permissionMode field is read from the config', () => {
-    assert.equal(resolvePermissionMode({ permissionMode: 'owned', extra: true }), PermissionMode.Owned)
-    assert.equal(resolvePermissionMode({ owned: true }), PermissionMode.Permissive)
+    assert.equal(resolveRaw({ permissionMode: 'owned', extra: true }), PermissionMode.Owned)
+    assert.equal(resolveRaw({ owned: true }), PermissionMode.Permissive)
   })
 })

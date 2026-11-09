@@ -5,8 +5,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import { apply, inject, name } from '../src/index.js'
+import type { PermissionConfig } from '../src/shared/types.js'
 
-function register(config?: unknown): ToolDefinition[] {
+function register(config?: PermissionConfig): ToolDefinition[] {
   const registered: ToolDefinition[] = []
   const ctx = {
     tools: {

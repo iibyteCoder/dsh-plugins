@@ -162,7 +162,7 @@ ${DSH_HOME:-~/.dsh}/storages/session-hub/owners.json
 ```bash
 pnpm install   # 安装 TypeScript、tsx 与宿主类型包
 pnpm check     # tsc --noEmit，检查 src 与 test 类型
-pnpm build     # tsc -p tsconfig.build.json，src/ → lib/
+pnpm build     # rimraf lib 后 tsc -p tsconfig.build.json，src/ → lib/
 pnpm test      # tsx --test，全部 182 个测试
 ```
 
