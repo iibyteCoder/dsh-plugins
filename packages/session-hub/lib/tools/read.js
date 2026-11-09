@@ -66,8 +66,6 @@ function createSessionListTool(ctx) {
         limit: {
           type: 'integer',
           description: 'Maximum number of rows to return (default 30, max 200).',
-          minimum: 1,
-          maximum: MAX_LIST_LIMIT,
           default: DEFAULT_LIST_LIMIT,
         },
       },
@@ -101,8 +99,6 @@ function createSessionGetTool(ctx) {
         include_recent: {
           type: 'integer',
           description: 'Number of most recent user/assistant messages to include (default 0, max 20).',
-          minimum: 0,
-          maximum: MAX_RECENT_MESSAGES,
           default: 0,
         },
       },
