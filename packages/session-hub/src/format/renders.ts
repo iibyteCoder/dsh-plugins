@@ -58,10 +58,14 @@ export function renderSearchResults(view: SearchView): string {
     hit.title === '' ? '-' : hit.title,
     truncateText(hit.snippet, SEARCH_SNIPPET_CHARS),
   ])
+  // `total` counts the raw host hits, `view.hits` is already collapsed to one
+  // row per session, and `shown` is how many rows the table actually renders.
+  const sessions = view.hits.length
+  const shown = rows.length
   const lines = [
     formatTable([SEARCH_HEADER, ...rows]),
     '',
-    `共 ${view.total} 条命中（显示 ${view.hits.length} 条）`,
+    `共 ${view.total} 条命中，涉及 ${sessions} 个会话（显示 ${shown} 个）`,
   ]
   if (view.hasMore) lines.push('（还有更多结果，请缩小查询）')
   return lines.join('\n')

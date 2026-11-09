@@ -157,7 +157,7 @@ describe('session_search', () => {
     assert.match(text, /s3\s+-\s+gamma/)
     assert.doesNotMatch(text, /second alpha/)
     assert.doesNotMatch(text, /orphan/)
-    assert.match(text, /共 5 条命中（显示 3 条）$/)
+    assert.match(text, /共 5 条命中，涉及 3 个会话（显示 3 个）$/)
   })
 
   test('owned search only asks for the caller and the sessions it created', async () => {
@@ -239,7 +239,7 @@ describe('session_search', () => {
     assert.equal(calls[0]?.request.limit, 50)
     assert.match(text, /x{200}…/)
     assert.doesNotMatch(text, /x{201}/)
-    assert.match(text, /^共 1 条命中（显示 1 条）$/m)
+    assert.match(text, /^共 1 条命中，涉及 1 个会话（显示 1 个）$/m)
     assert.match(text, /（还有更多结果，请缩小查询）$/)
   })
 

@@ -302,7 +302,7 @@ describe('host service access', () => {
 
     assert.match(text, /^ID\s+TITLE\s+SNIPPET/)
     assert.match(text, /s1\s+Host session\s+needle/)
-    assert.match(text, /共 1 条命中（显示 1 条）$/)
+    assert.match(text, /共 1 条命中，涉及 1 个会话（显示 1 个）$/)
   })
 
   test('session_create resolves the workspace and records the owner through ctx.get', async () => {

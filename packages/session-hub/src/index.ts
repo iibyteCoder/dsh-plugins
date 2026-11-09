@@ -2,7 +2,7 @@
  * dsh-session-hub — cross-session tools for DeepSeek Harness.
  *
  * Host plugin entry point. `apply` resolves the permission mode once, then
- * registers the nine tools; every tool factory receives the same options so
+ * registers the ten tools; every tool factory receives the same options so
  * the registration surface is fixed for this plugin instance.
  */
 import type { Context } from '@deepseek-ai/cordis'
