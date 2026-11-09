@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
-import { ownerIndexPath, readOwnerIndex } from '../lib/owner-index.js'
+import { ownerIndexPath, readOwnerIndex, recordOwner } from '../lib/owner-index.js'
 
 const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'session-hub-owner-'))
 process.env.DSH_HOME = tempHome
@@ -53,5 +53,50 @@ test('readOwnerIndex ignores malformed content and entries', async () => {
   assert.deepEqual(await readOwnerIndex(), {})
 
   writeOwnerFile(JSON.stringify({ s1: 'nope', s2: { ownerSessionId: '' } }))
+  assert.deepEqual(await readOwnerIndex(), {})
+})
+
+test('recordOwner creates the directory and writes the entry atomically', async () => {
+  fs.rmSync(path.dirname(ownerIndexPath()), { recursive: true, force: true })
+
+  await recordOwner('new-session', 'caller')
+
+  const raw = JSON.parse(fs.readFileSync(ownerIndexPath(), 'utf8'))
+  assert.equal(raw['new-session'].ownerSessionId, 'caller')
+  assert.equal(typeof raw['new-session'].createdAt, 'number')
+  assert.deepEqual(fs.readdirSync(path.dirname(ownerIndexPath())), ['owners.json'])
+})
+
+test('recordOwner merges with existing entries', async () => {
+  writeOwnerFile(JSON.stringify({ s1: { ownerSessionId: 'caller', createdAt: 1 } }))
+
+  await recordOwner('s2', 'caller')
+
+  const owners = await readOwnerIndex()
+  assert.deepEqual(owners.s1, { ownerSessionId: 'caller', createdAt: 1 })
+  assert.equal(owners.s2.ownerSessionId, 'caller')
+  assert.equal(typeof owners.s2.createdAt, 'number')
+})
+
+test('recordOwner serializes concurrent writes without losing entries', async () => {
+  fs.rmSync(path.dirname(ownerIndexPath()), { recursive: true, force: true })
+
+  await Promise.all(
+    Array.from({ length: 8 }, (_, index) => recordOwner(`s${index}`, 'caller')),
+  )
+
+  const owners = await readOwnerIndex()
+  assert.equal(Object.keys(owners).length, 8)
+  for (let index = 0; index < 8; index += 1) {
+    assert.equal(owners[`s${index}`].ownerSessionId, 'caller')
+  }
+  assert.deepEqual(fs.readdirSync(path.dirname(ownerIndexPath())), ['owners.json'])
+})
+
+test('recordOwner rejects empty ids instead of writing a corrupt entry', async () => {
+  fs.rmSync(path.dirname(ownerIndexPath()), { recursive: true, force: true })
+
+  await assert.rejects(() => recordOwner('', 'caller'), /sessionId and ownerSessionId are required/)
+  await assert.rejects(() => recordOwner('s1', ''), /sessionId and ownerSessionId are required/)
   assert.deepEqual(await readOwnerIndex(), {})
 })

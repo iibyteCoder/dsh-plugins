@@ -50,3 +50,85 @@ export async function readOwnerIndex() {
   }
   return owners
 }
+
+// Tail of the in-process write queue. Every recordOwner() call appends its
+// read-modify-write cycle here, so two concurrent creates cannot both read the
+// same snapshot and then overwrite each other's entry.
+let writeQueue = Promise.resolve()
+
+/**
+ * Record which session created another session.
+ *
+ * Reads the current index, merges `{ [sessionId]: { ownerSessionId, createdAt } }`
+ * and writes the whole document back. Writes are serialized inside this process
+ * and committed with a temp-file + rename, so an interrupted write cannot leave
+ * a half-written `owners.json` behind.
+ *
+ * @param {string} sessionId - Session that was created.
+ * @param {string} ownerSessionId - Session that created it.
+ * @returns {Promise<void>}
+ */
+export function recordOwner(sessionId, ownerSessionId) {
+  const target = typeof sessionId === 'string' ? sessionId.trim() : ''
+  const owner = typeof ownerSessionId === 'string' ? ownerSessionId.trim() : ''
+  if (target === '' || owner === '') {
+    return Promise.reject(
+      new Error('session-hub: sessionId and ownerSessionId are required to record ownership'),
+    )
+  }
+
+  const write = () => updateOwnerIndex(target, owner)
+  const result = writeQueue.then(write, write)
+  // Keep the queue usable after a failed write; the failure itself is reported
+  // to the caller through `result`.
+  writeQueue = result.then(
+    () => undefined,
+    () => undefined,
+  )
+  return result
+}
+
+/**
+ * @param {string} sessionId
+ * @param {string} ownerSessionId
+ * @returns {Promise<void>}
+ */
+async function updateOwnerIndex(sessionId, ownerSessionId) {
+  const owners = await readOwnerIndex()
+  owners[sessionId] = { ownerSessionId, createdAt: Date.now() }
+  await writeOwnerIndex(owners)
+}
+
+/**
+ * Atomically replace the owner index with `owners`.
+ *
+ * @param {Record<string, unknown>} owners
+ * @returns {Promise<void>}
+ */
+async function writeOwnerIndex(owners) {
+  const file = ownerIndexPath()
+  const directory = path.dirname(file)
+  await fs.mkdir(directory, { recursive: true })
+
+  const tempFile = path.join(
+    directory,
+    `${path.basename(file)}.${process.pid}.${Date.now()}.${randomSuffix()}.tmp`,
+  )
+  try {
+    await fs.writeFile(tempFile, `${JSON.stringify(owners, null, 2)}\n`, 'utf8')
+    await fs.rename(tempFile, file)
+  } catch (error) {
+    await fs.rm(tempFile, { force: true }).catch(() => {})
+    throw error
+  }
+}
+
+/**
+ * Short random fragment that keeps concurrent temp file names distinct even
+ * within the same millisecond.
+ *
+ * @returns {string}
+ */
+function randomSuffix() {
+  return Math.random().toString(16).slice(2, 10)
+}

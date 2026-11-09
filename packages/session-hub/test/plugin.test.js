@@ -12,11 +12,14 @@ test('apply tolerates a context without tools', () => {
   assert.doesNotThrow(() => apply({}))
 })
 
-test('apply registers the read-only tools', () => {
+test('apply registers the read and create tools', () => {
   const registered = []
   apply({ tools: { register: (tool) => registered.push(tool) } })
 
-  assert.deepEqual(registered.map((tool) => tool.name), ['session_list', 'session_get'])
+  assert.deepEqual(
+    registered.map((tool) => tool.name),
+    ['session_list', 'session_get', 'session_create'],
+  )
   for (const tool of registered) {
     assert.equal(typeof tool.execute, 'function')
     assert.equal(typeof tool.output.render, 'function')

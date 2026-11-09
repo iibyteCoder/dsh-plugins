@@ -1,83 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
+import { createSessionCreateTool } from '../lib/tools/create.js'
 import { createReadTools } from '../lib/tools/read.js'
-
-// Keep in sync with the keyword whitelist enforced by the DSH host at
-// `ctx.tools.register`. Anything outside this subset is rejected at runtime.
-const SUPPORTED_KEYWORDS = new Set([
-  // constraints
-  'type',
-  'oneOf',
-  'properties',
-  'required',
-  'additionalProperties',
-  'items',
-  'enum',
-  'const',
-  // annotations
-  'description',
-  'title',
-  'default',
-  'examples',
-])
-
-const SUPPORTED_TYPES = new Set(['object', 'string', 'number', 'integer', 'boolean', 'null', 'array'])
-
-function isPlainObject(value) {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-/**
- * Recursively assert that every node of a JSON Schema stays inside the subset
- * the DSH host understands.
- *
- * @param {unknown} schema - Schema node to inspect.
- * @param {string} location - Human readable path used in failure messages.
- * @returns {void}
- */
-function assertSupportedSchema(schema, location) {
-  assert.ok(isPlainObject(schema), `${location}: schema node must be an object`)
-
-  for (const [keyword, value] of Object.entries(schema)) {
-    assert.ok(SUPPORTED_KEYWORDS.has(keyword), `${location}: unsupported keyword "${keyword}"`)
-
-    if (keyword === 'type') {
-      assert.ok(SUPPORTED_TYPES.has(value), `${location}.type: unsupported type "${String(value)}"`)
-    }
-
-    if (keyword === 'properties') {
-      assert.ok(isPlainObject(value), `${location}.properties: must be an object`)
-      for (const [name, child] of Object.entries(value)) {
-        assertSupportedSchema(child, `${location}.properties.${name}`)
-      }
-    }
-
-    if (keyword === 'items') {
-      assertSupportedSchema(value, `${location}.items`)
-    }
-
-    if (keyword === 'oneOf') {
-      assert.ok(Array.isArray(value) && value.length > 0, `${location}.oneOf: must be a non-empty array`)
-      value.forEach((child, index) => {
-        assertSupportedSchema(child, `${location}.oneOf[${index}]`)
-      })
-    }
-
-    if (keyword === 'additionalProperties') {
-      assert.ok(
-        typeof value === 'boolean' || isPlainObject(value),
-        `${location}.additionalProperties: must be a boolean or a schema object`,
-      )
-      if (isPlainObject(value)) {
-        assertSupportedSchema(value, `${location}.additionalProperties`)
-      }
-    }
-  }
-}
+import { assertSupportedSchema, isPlainObject } from './helpers/schema-guard.js'
 
 const ctx = { tools: { register() {} } }
-const tools = createReadTools(ctx)
+const tools = [...createReadTools(ctx), createSessionCreateTool(ctx)]
 
 function toolByName(toolName) {
   const tool = tools.find((candidate) => candidate.name === toolName)
@@ -85,10 +14,10 @@ function toolByName(toolName) {
   return tool
 }
 
-test('read-only tools expose the expected names', () => {
+test('registered tools expose the expected names', () => {
   assert.deepEqual(
     tools.map((tool) => tool.name),
-    ['session_list', 'session_get'],
+    ['session_list', 'session_get', 'session_create'],
   )
 })
 
@@ -102,6 +31,21 @@ test('output schemas only use supported keywords', () => {
   for (const tool of tools) {
     assert.ok(isPlainObject(tool.output), `${tool.name}.output: must be an object`)
     assertSupportedSchema(tool.output.schema, `${tool.name}.output.schema`)
+  }
+})
+
+test('session_create parameters are optional strings', () => {
+  const parameters = toolByName('session_create').parameters
+
+  assert.deepEqual(parameters.required, [])
+  assert.deepEqual(Object.keys(parameters.properties).sort(), [
+    'agent_preset',
+    'cwd',
+    'title',
+    'workspace',
+  ])
+  for (const [name, schema] of Object.entries(parameters.properties)) {
+    assert.equal(schema.type, 'string', `session_create.${name}: expected type string`)
   }
 })
 
