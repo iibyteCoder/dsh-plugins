@@ -49,6 +49,7 @@ describe('plugin entry', () => {
         'session_send',
         'session_wake',
         'session_wait',
+        'session_search',
       ],
     )
     for (const tool of registered) {
@@ -70,6 +71,7 @@ describe('plugin entry', () => {
     assert.equal('confirm' in propertiesOf(byName('session_send')), false)
     assert.equal('confirm' in propertiesOf(byName('session_wake')), false)
     assert.equal('confirm' in propertiesOf(byName('session_wait')), false)
+    assert.equal('confirm' in propertiesOf(byName('session_search')), false)
   })
 
   test('apply registers the owned schemas when permissionMode is "owned"', () => {
@@ -85,6 +87,7 @@ describe('plugin entry', () => {
       assert.equal(confirm.type, 'boolean')
     }
     assert.equal('confirm' in propertiesOf(byName('session_wait')), false)
+    assert.equal('confirm' in propertiesOf(byName('session_search')), false)
   })
 
   test('apply treats an invalid permissionMode as permissive', () => {

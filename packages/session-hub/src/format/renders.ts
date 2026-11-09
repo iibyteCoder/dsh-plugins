@@ -8,11 +8,12 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 
 import { ErrorCode, SessionEventKind, WaitOutcome } from '../shared/enums.js'
 import { sessionHubError } from '../shared/errors.js'
-import { MAX_RECENT_MESSAGE_CHARS, MAX_REPLY_CHARS } from '../shared/limits.js'
+import { MAX_RECENT_MESSAGE_CHARS, MAX_REPLY_CHARS, SEARCH_SNIPPET_CHARS } from '../shared/limits.js'
 import type {
   CreatedSessionView,
   ModelChangeView,
   ModelSelection,
+  SearchView,
   SessionDetail,
   SessionListView,
   SessionMessageView,
@@ -22,6 +23,8 @@ import type {
 import { formatTable, formatTime, truncateText } from './text.js'
 
 const LIST_HEADER = ['ID', 'TITLE', 'WORKSPACE', 'CWD', 'STATUS', 'MODEL', 'OWNER', 'UPDATED']
+
+const SEARCH_HEADER = ['ID', 'TITLE', 'SNIPPET']
 
 /** The output projection shared by every tool: the result string as text. */
 export function renderText(_args: unknown, value: unknown): ContentBlock[] {
@@ -44,6 +47,24 @@ export function renderSessionList(view: SessionListView): string {
   ])
   const table = formatTable([LIST_HEADER, ...rows])
   return `${table}\n\n共 ${view.total} 个会话（显示 ${view.rows.length} 个）`
+}
+
+/** Render the `session_search` result. */
+export function renderSearchResults(view: SearchView): string {
+  if (view.hits.length === 0) return '没有匹配的会话。'
+
+  const rows = view.hits.map((hit) => [
+    hit.sessionId,
+    hit.title === '' ? '-' : hit.title,
+    truncateText(hit.snippet, SEARCH_SNIPPET_CHARS),
+  ])
+  const lines = [
+    formatTable([SEARCH_HEADER, ...rows]),
+    '',
+    `共 ${view.total} 条命中（显示 ${view.hits.length} 条）`,
+  ]
+  if (view.hasMore) lines.push('（还有更多结果，请缩小查询）')
+  return lines.join('\n')
 }
 
 /** Render the `session_get` result. */

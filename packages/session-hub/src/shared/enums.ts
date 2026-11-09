@@ -23,6 +23,7 @@ export enum ToolName {
   SessionSend = 'session_send',
   SessionWake = 'session_wake',
   SessionWait = 'session_wait',
+  SessionSearch = 'session_search',
 }
 
 /**
@@ -38,6 +39,8 @@ export enum ErrorCode {
   SelfTarget = 'SELF_TARGET',
   SessionArchived = 'SESSION_ARCHIVED',
   WaitTimeout = 'WAIT_TIMEOUT',
+  SearchUnavailable = 'SEARCH_UNAVAILABLE',
+  SearchFailed = 'SEARCH_FAILED',
 }
 
 /** Lifecycle status of one session, as session-hub reports it. */
@@ -95,6 +98,7 @@ export enum HostService {
   WorkspaceRegistry = 'workspaceRegistry',
   Sessions = 'sessions',
   Agents = 'agents',
+  SessionQuery = 'sessionQuery',
 }
 
 /** The `owner` filter sentinel values of `session_list`; any other value is a session id. */

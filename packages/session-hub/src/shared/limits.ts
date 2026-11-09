@@ -35,3 +35,15 @@ export const MIN_TIMEOUT_MS = 1000
 
 /** Largest accepted wait budget. */
 export const MAX_TIMEOUT_MS = 600000
+
+/** Default number of `session_search` hits. */
+export const SEARCH_DEFAULT_LIMIT = 20
+
+/** Smallest accepted `session_search` limit. */
+export const SEARCH_MIN_LIMIT = 1
+
+/** Largest accepted `session_search` limit. */
+export const SEARCH_MAX_LIMIT = 50
+
+/** Longest single hit snippet rendered by `session_search`. */
+export const SEARCH_SNIPPET_CHARS = 200

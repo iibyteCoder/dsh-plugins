@@ -187,3 +187,64 @@ export interface SessionRegistry {
 export interface AgentRegistry {
   get?(sessionId: string): TargetAgent | undefined
 }
+
+/**
+ * One ANDed logical-session clause of a cross-session search.
+ *
+ * The host also accepts `created-at`, `parent` and `availability`; session-hub
+ * deliberately only builds `id` and `cwd`, the two clauses its tools expose.
+ */
+export interface SessionSearchFilter {
+  readonly kind: 'id' | 'cwd'
+  readonly values: readonly string[]
+}
+
+/** Request of `sessionQuery.searchSessions`. */
+export interface SessionSearchRequest {
+  readonly query: string
+  readonly sessionFilters?: readonly SessionSearchFilter[]
+  readonly limit?: number
+}
+
+/**
+ * The header of one search hit.
+ *
+ * It carries identity, cwd and creation time only — never a title — so a title
+ * has to be completed from the session listing.
+ */
+export interface SessionSearchHeader {
+  readonly id?: unknown
+  readonly cwd?: unknown
+  readonly createdAt?: unknown
+}
+
+/** The best event match of one hit; only its snippet is rendered. */
+export interface SessionSearchMatch {
+  readonly sessionId?: unknown
+  readonly snippet?: unknown
+}
+
+/** One host search hit: a session plus its best matching event. */
+export interface SessionSearchItem {
+  readonly header?: SessionSearchHeader
+  readonly bestMatch?: SessionSearchMatch
+}
+
+/** One page of host search hits. */
+export interface SessionSearchResult {
+  readonly items?: readonly SessionSearchItem[]
+  readonly nextCursor?: unknown
+}
+
+/** Execution options accepted by the host search method. */
+export interface SessionSearchExec {
+  readonly signal?: AbortSignal
+}
+
+/** The one host search capability session-hub calls. */
+export interface SessionQueryService {
+  searchSessions(
+    request: SessionSearchRequest,
+    exec?: SessionSearchExec,
+  ): Promise<SessionSearchResult | undefined>
+}

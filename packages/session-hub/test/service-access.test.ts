@@ -21,6 +21,7 @@ import { ownerIndexPath, readOwnerIndex, recordOwner } from '../src/host/owner-i
 import { createSessionCreateTool } from '../src/tools/create.js'
 import { createManageTools } from '../src/tools/manage.js'
 import { createReadTools } from '../src/tools/read.js'
+import { createSearchTool } from '../src/tools/search.js'
 import { createSendTools } from '../src/tools/send.js'
 import type { AgentMessage, HostContext } from '../src/shared/types.js'
 import {
@@ -57,6 +58,7 @@ const GUARDED_SERVICES = [
   'workspaceController',
   'sessions',
   'agents',
+  'sessionQuery',
   'logger',
 ]
 
@@ -201,6 +203,11 @@ function createHostServices(overrides: HostServiceOverrides = {}): {
     },
     sessions: overrides.sessions ?? { get: () => undefined },
     agents: overrides.agents ?? { get: () => undefined },
+    sessionQuery: {
+      searchSessions: async () => ({
+        items: [{ header: { id: 's1' }, bestMatch: { sessionId: 's1', snippet: 'needle' } }],
+      }),
+    },
     logger: { debug: () => {} },
   }
   return { services, calls, agent }
@@ -245,6 +252,7 @@ describe('host service access', () => {
         'session_send',
         'session_wake',
         'session_wait',
+        'session_search',
       ],
     )
   })
@@ -278,6 +286,23 @@ describe('host service access', () => {
     assert.match(text, /^- id: s1$/m)
     assert.match(text, /^- cwd: /m)
     assert.match(text, /^- status: running$/m)
+  })
+
+  test('session_search queries the host search service through ctx.get', async () => {
+    const { services } = createHostServices()
+    const { ctx } = createHostContext(services)
+
+    const text = assertNoInjectFailure(
+      await executeTool(
+        createSearchTool(ctx as unknown as HostContext),
+        { query: 'needle' },
+        exec,
+      ),
+    )
+
+    assert.match(text, /^ID\s+TITLE\s+SNIPPET/)
+    assert.match(text, /s1\s+Host session\s+needle/)
+    assert.match(text, /共 1 条命中（显示 1 条）$/)
   })
 
   test('session_create resolves the workspace and records the owner through ctx.get', async () => {

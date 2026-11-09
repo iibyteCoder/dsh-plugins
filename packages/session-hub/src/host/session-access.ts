@@ -1,10 +1,10 @@
 /**
- * One read model of session state, shared by `session_list`, `session_get`
- * and `session_wait`.
+ * One read model of session state, shared by `session_list`, `session_get`,
+ * `session_wait` and `session_search`.
  *
  * The host exposes several overlapping projections (listing rows, inspection
  * metadata, live agents, archived ids). Keeping the precedence rules here
- * means the three tools cannot disagree about whether a session is running,
+ * means the tools cannot disagree about whether a session is running,
  * archived or unknown.
  */
 import path from 'node:path'
@@ -173,6 +173,40 @@ export async function findSessionItem(
   } catch {
     return undefined
   }
+}
+
+/**
+ * Session id → title projection.
+ *
+ * Search hits carry no title, so `session_search` completes them from this one
+ * read model instead of inventing a second listing. A missing controller or a
+ * failing listing yields an empty map: a title is enrichment, not a reason to
+ * fail the search.
+ */
+export async function readSessionTitles(
+  ctx: HostContext,
+): Promise<ReadonlyMap<string, string>> {
+  const controller = serviceOf(ctx, HostService.SessionController) as
+    | SessionController
+    | null
+    | undefined
+  if (controller === undefined || controller === null) return new Map()
+
+  let items: readonly SessionSummary[]
+  try {
+    items = await listSessionItems(controller)
+  } catch {
+    return new Map()
+  }
+
+  const titles = new Map<string, string>()
+  for (const item of items) {
+    const id = sessionIdOf(item)
+    if (id === '') continue
+    const title = sessionTitle(item)
+    if (title !== '') titles.set(id, title)
+  }
+  return titles
 }
 
 /** Status implied by a listing row, ignoring archiving. */

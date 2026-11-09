@@ -193,6 +193,25 @@ export interface SessionListView {
   readonly total: number
 }
 
+/** One deduplicated session hit of `session_search`. */
+export interface SearchHit {
+  readonly sessionId: string
+  readonly title: string
+  readonly snippet: string
+}
+
+/**
+ * Result of `session_search`, and the input of its renderer.
+ *
+ * `total` counts the raw hits returned by the host, before hits are collapsed
+ * per session; `hits` holds one row per matching session.
+ */
+export interface SearchView {
+  readonly hits: readonly SearchHit[]
+  readonly total: number
+  readonly hasMore: boolean
+}
+
 /** A workspace title matched by the `session_list` workspace filter. */
 export interface WorkspaceFilter {
   readonly needle: string

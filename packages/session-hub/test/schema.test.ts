@@ -6,6 +6,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { createSessionCreateTool } from '../src/tools/create.js'
 import { createManageTools } from '../src/tools/manage.js'
 import { createReadTools } from '../src/tools/read.js'
+import { createSearchTool } from '../src/tools/search.js'
 import { createSendTools } from '../src/tools/send.js'
 import { PermissionMode } from '../src/shared/enums.js'
 import type { HostContext } from '../src/shared/types.js'
@@ -25,6 +26,7 @@ const EXPECTED_TOOL_NAMES = [
   'session_send',
   'session_wake',
   'session_wait',
+  'session_search',
 ]
 
 function buildTools(permissionMode: PermissionMode): ToolDefinition[] {
@@ -33,6 +35,7 @@ function buildTools(permissionMode: PermissionMode): ToolDefinition[] {
     createSessionCreateTool(ctx, { permissionMode }),
     ...createManageTools(ctx, { permissionMode }),
     ...createSendTools(ctx, { permissionMode }),
+    createSearchTool(ctx, { permissionMode }),
   ]
 }
 
