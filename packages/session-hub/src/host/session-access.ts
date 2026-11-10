@@ -2,21 +2,23 @@
  * One read model of session state, shared by `session_list`, `session_get`,
  * `session_wait` and `session_search`.
  *
- * The host exposes several overlapping projections (listing rows, inspection
- * metadata, live agents, archived ids). Keeping the precedence rules here
+ * The host exposes several overlapping projections (listing rows, session
+ * headers, live agents, archived ids). Keeping the precedence rules here
  * means the tools cannot disagree about whether a session is running,
  * archived or unknown.
  */
 import path from 'node:path'
 
 import { HostService, SessionEventKind, SessionStatus } from '../shared/enums.js'
+import { errorMessage } from '../shared/errors.js'
 import type { HostContext, SessionEventView } from '../shared/types.js'
 import type {
+  LiveSession,
   SessionController,
   SessionIdentity,
-  SessionInspection,
   SessionListValue,
-  SessionSnapshot,
+  SessionObservation,
+  SessionQueryService,
   SessionSummary,
   WorkspaceRegistry,
   WorkspaceSummary,
@@ -49,7 +51,7 @@ function stripTrailingSeparators(resolved: string): string {
   return value
 }
 
-/** Session id of a listing row or inspection metadata. */
+/** Session id of a listing row or session header. */
 export function sessionIdOf(item: SessionIdentity): string {
   const id = item.sessionId ?? item.id
   return typeof id === 'string' ? id : ''
@@ -161,12 +163,12 @@ export async function listSessionItems(
   return Array.isArray(items) ? (items as readonly SessionSummary[]) : []
 }
 
-/** Find one row in the host listing; inspection failures yield `undefined`. */
+/** Find one row in the host listing; a missing controller or a failure yields `undefined`. */
 export async function findSessionItem(
-  controller: SessionController,
+  controller: SessionController | undefined,
   id: string,
 ): Promise<SessionSummary | undefined> {
-  if (typeof controller.list !== 'function') return undefined
+  if (controller === undefined || typeof controller.list !== 'function') return undefined
   try {
     const items = await listSessionItems(controller)
     return items.find((item) => sessionIdOf(item) === id)
@@ -248,7 +250,7 @@ function readAgentStatus(services: HostServices, id: string): string {
 /** Resolve the status shown by `session_get`. */
 export async function resolveSessionStatus(
   services: HostServices,
-  controller: SessionController,
+  controller: SessionController | undefined,
   id: string,
 ): Promise<SessionStatus> {
   if (isArchived(services.workspaces, id)) return SessionStatus.Archived
@@ -261,53 +263,82 @@ export async function resolveSessionStatus(
   return SessionStatus.Unknown
 }
 
-/** Snapshot events of a live session, or `[]` when it is not resident. */
-function readSnapshotEvents(ctx: HostContext, sessionId: string): readonly SessionEventView[] {
-  try {
-    const session = readServices(ctx).sessions?.get?.(sessionId) as SessionSnapshot | undefined
-    if (session === undefined || session === null || typeof session.snapshotEvents !== 'function') {
-      return []
-    }
-    const events: readonly unknown[] = session.snapshotEvents()
-    return Array.isArray(events) ? (events as readonly SessionEventView[]) : []
-  } catch {
-    return []
-  }
+/** One exact read of a session: its durable header and committed events. */
+export interface SessionSnapshot {
+  readonly header: Record<string, unknown>
+  readonly events: readonly unknown[]
 }
 
-async function inspectEvents(
-  controller: SessionController,
-  sessionId: string,
-): Promise<readonly SessionEventView[]> {
-  if (typeof controller.inspect !== 'function') return []
-  try {
-    const inspection: SessionInspection | null | undefined = await controller.inspect(sessionId)
-    const events = inspection?.events
-    return Array.isArray(events) ? (events as readonly SessionEventView[]) : []
-  } catch {
-    return []
-  }
+function isLiveSession(value: unknown): value is LiveSession {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { readonly snapshotEvents?: unknown }).snapshotEvents === 'function'
+  )
+}
+
+/** Release one borrowed observation; the host pins a cold read until disposal. */
+function releaseObservation(observation: SessionObservation): void {
+  observation[Symbol.dispose]?.()
 }
 
 /**
- * Read the conversation events of a session, preferring the live snapshot and
- * falling back to a log inspection for a session that is not resident.
+ * Read one session's header and events through the host's own session reads.
+ *
+ * A live session is read from the session store, which is the cheapest exact
+ * view and never touches persistence. A session that is not resident is read
+ * through `sessionQuery.observeSession` with projections disabled: this tool
+ * renders the log, not projection state, so computing it would be wasted work.
+ *
+ * Failures are thrown with the host's original message instead of being
+ * flattened into "not found": the caller has to report what actually broke.
  */
-export async function readSessionEvents(
+export async function readSessionSnapshot(
   ctx: HostContext,
   sessionId: string,
-): Promise<readonly SessionEventView[]> {
-  const events = [...readSnapshotEvents(ctx, sessionId)]
-  if (events.length === 0) {
-    const controller = serviceOf(ctx, HostService.SessionController) as
-      | SessionController
-      | null
-      | undefined
-    if (controller !== undefined && controller !== null) {
-      events.push(...(await inspectEvents(controller, sessionId)))
+  signal?: AbortSignal,
+): Promise<SessionSnapshot> {
+  const failures: string[] = []
+
+  try {
+    const live = readServices(ctx).sessions?.get?.(sessionId)
+    if (live !== undefined && live !== null) {
+      if (!isLiveSession(live)) {
+        throw new Error(`live session "${sessionId}" exposes no event snapshot`)
+      }
+      const events: unknown = live.snapshotEvents()
+      return { header: live.header, events: Array.isArray(events) ? events : [] }
+    }
+  } catch (error) {
+    failures.push(errorMessage(error))
+  }
+
+  const query = serviceOf(ctx, HostService.SessionQuery) as SessionQueryService | undefined
+  if (query !== undefined && query !== null && typeof query.observeSession === 'function') {
+    try {
+      const observation = await query.observeSession(sessionId, {
+        projectionMode: 'none',
+        ...(signal === undefined ? {} : { signal }),
+      })
+      if (observation === undefined || observation === null || typeof observation !== 'object') {
+        throw new Error(`session "${sessionId}" read returned no snapshot`)
+      }
+      try {
+        const events: unknown = observation.events
+        return { header: observation.header, events: Array.isArray(events) ? events : [] }
+      } finally {
+        releaseObservation(observation)
+      }
+    } catch (error) {
+      failures.push(errorMessage(error))
     }
   }
-  return events
+
+  const lastFailure = failures[failures.length - 1]
+  if (lastFailure !== undefined) throw new Error(lastFailure)
+  throw new Error(
+    `session "${sessionId}" cannot be read: neither the session store nor the session query service is available`,
+  )
 }
 
 /** Text of a message event's content blocks. */
@@ -326,11 +357,29 @@ export function extractMessageText(content: unknown): string {
     .join('\n')
 }
 
-/** The last assistant message of a session, or `''` when there is none. */
-export function lastAssistantEvent(
-  events: readonly SessionEventView[],
-): SessionEventView | undefined {
-  return [...events]
-    .reverse()
-    .find((event) => event.type === SessionEventKind.AssistantMessage)
+/**
+ * Text of one conversation event.
+ *
+ * `user/message` carries its content directly, while `assistant/message` wraps
+ * the assistant message under `message`; the log's assistant content is only
+ * reachable through that wrapper. The direct form stays supported for events
+ * recorded by older plugins.
+ */
+export function eventMessageText(event: SessionEventView): string {
+  return extractMessageText(event.data?.message?.content ?? event.data?.content)
+}
+
+/** The last assistant message of a session, or `undefined` when there is none. */
+export function lastAssistantEvent(events: readonly unknown[]): SessionEventView | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (
+      typeof event === 'object' &&
+      event !== null &&
+      (event as { readonly type?: unknown }).type === SessionEventKind.AssistantMessage
+    ) {
+      return event as SessionEventView
+    }
+  }
+  return undefined
 }

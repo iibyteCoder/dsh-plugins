@@ -11,10 +11,11 @@ import { readOwnerIndex } from '../host/owner-index.js'
 import {
   archivedSessionIds,
   cwdKey,
-  extractMessageText,
+  eventMessageText,
   listSessionItems,
   loadWorkspaces,
   matchesWorkspace,
+  readSessionSnapshot,
   resolveSessionStatus,
   sessionCwd,
   sessionIdOf,
@@ -23,12 +24,20 @@ import {
   sessionTitle,
   sessionUpdatedAt,
   workspaceForSession,
+  type SessionSnapshot,
 } from '../host/session-access.js'
 import { readServices, requireController } from '../host/services.js'
-import type { SessionInspection, SessionSummary, WorkspaceSummary } from '../host/contracts.js'
+import type { SessionSummary, WorkspaceSummary } from '../host/contracts.js'
 import { asToolArgs, integerOption, nonEmptyString, stringArg, textOrDash } from '../shared/args.js'
-import { OwnerFilter, SessionEventKind, SessionStatus, StatusFilter, ToolName } from '../shared/enums.js'
-import { sessionHubText, toErrorText } from '../shared/errors.js'
+import {
+  ErrorCode,
+  OwnerFilter,
+  SessionEventKind,
+  SessionStatus,
+  StatusFilter,
+  ToolName,
+} from '../shared/enums.js'
+import { errorMessage, sessionHubError, sessionHubText, toErrorText } from '../shared/errors.js'
 import {
   DEFAULT_LIST_LIMIT,
   MAX_LIST_LIMIT,
@@ -128,7 +137,7 @@ function createSessionGetTool(ctx: HostContext): ToolDefinition {
       properties: {
         session_id: {
           type: 'string',
-          description: 'Session id to inspect.',
+          description: 'Session id to read.',
         },
         include_recent: {
           type: 'integer',
@@ -218,22 +227,20 @@ async function executeSessionGet(
   if (sessionId === '') return sessionHubText('session_id is required')
 
   const services = readServices(ctx)
-  const controller = requireController(ctx)
 
-  let inspection: SessionInspection | null | undefined
+  // Read the session before anything else: a read failure has to keep the
+  // host's own message instead of being flattened into "not found".
+  let snapshot: SessionSnapshot
   try {
-    inspection = await controller.inspect(sessionId, exec.signal)
-  } catch {
-    return sessionHubText(`session "${sessionId}" not found`)
-  }
-  if (inspection === null || inspection === undefined || typeof inspection !== 'object') {
-    return sessionHubText(`session "${sessionId}" not found`)
+    snapshot = await readSessionSnapshot(ctx, sessionId, exec.signal)
+  } catch (error) {
+    return sessionHubError(ErrorCode.GetFailed, errorMessage(error))
   }
 
-  const meta = inspection.meta ?? {}
-  const id = sessionIdOf(meta) || sessionId
+  const header = snapshot.header
+  const id = sessionIdOf(header) || sessionId
   const ownerId = (await readOwnerIndex())[id]?.ownerSessionId
-  const status = await resolveSessionStatus(services, controller, id)
+  const status = await resolveSessionStatus(services, services.controller, id)
   const callerId = callerViewerId(exec)
 
   const recentCount = integerOption(
@@ -242,32 +249,31 @@ async function executeSessionGet(
     MIN_RECENT_MESSAGES,
     MAX_RECENT_MESSAGES,
   )
-  const recentMessages: SessionMessageView[] = []
-  if (recentCount > 0) {
-    const events: readonly unknown[] = Array.isArray(inspection.events) ? inspection.events : []
-    const messages = events.filter(isMessageEvent)
-    const recent = messages.slice(-recentCount)
-    for (const event of recent) {
-      recentMessages.push({
-        type: event.type,
-        kind: sourceKindOf(event),
-        text: extractMessageText(event.data?.content),
-      })
-    }
-  }
+  const recentMessages = recentMessagesOf(snapshot.events, recentCount)
 
   const detail: SessionDetail = {
     id,
-    createdAt: meta.createdAt ?? meta.created_at ?? inspection.createdAt,
-    cwd: meta.cwd ?? inspection.cwd,
-    parentSession: meta.parentSession ?? meta.parentSessionId ?? inspection.parentSession,
-    origin: meta.origin ?? inspection.origin,
-    agentPreset: meta.agentPreset ?? meta.agentPresetId ?? inspection.agentPreset,
+    createdAt: header.createdAt ?? header.created_at,
+    cwd: header.cwd,
+    parentSession: header.parentSession ?? header.parentSessionId,
+    origin: header.origin,
+    agentPreset: header.agentPreset ?? header.agentPresetId,
     status,
     owner: ownerLabel(ownerId, callerId),
     recentMessages,
   }
   return renderSessionDetail(detail)
+}
+
+/** The last `count` user/assistant messages of a session, oldest first. */
+function recentMessagesOf(events: readonly unknown[], count: number): SessionMessageView[] {
+  if (count <= 0) return []
+  const messages = events.filter(isMessageEvent).slice(-count)
+  return messages.map((event) => ({
+    type: event.type,
+    kind: sourceKindOf(event),
+    text: eventMessageText(event),
+  }))
 }
 
 function isMessageEvent(event: unknown): event is SessionEventView & { type: SessionEventKind } {

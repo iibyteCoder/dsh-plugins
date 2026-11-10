@@ -37,10 +37,15 @@ interface SessionLookup {
   readonly get: (sessionId: string) => unknown
 }
 
+interface SessionQueryLookup {
+  readonly observeSession: (sessionId: string, options?: Record<string, unknown>) => Promise<unknown>
+}
+
 interface SendCtxOptions {
   readonly agent?: FakeAgentOverrides
   readonly agents?: AgentLookup
   readonly sessions?: SessionLookup
+  readonly sessionQuery?: SessionQueryLookup
   readonly workspaceRegistry?: { readonly archivedSessionIds: readonly unknown[] }
 }
 
@@ -49,11 +54,10 @@ interface SendCalls {
   followup: AgentMessage[]
   steer: AgentMessage[]
   resolveAgent: string[]
-  inspect: string[]
 }
 
 function createCtx(options: SendCtxOptions = {}) {
-  const calls: SendCalls = { inject: [], followup: [], steer: [], resolveAgent: [], inspect: [] }
+  const calls: SendCalls = { inject: [], followup: [], steer: [], resolveAgent: [] }
   const overrides = options.agent ?? {}
   const agent = {
     status: 'status' in overrides ? overrides.status : 'idle',
@@ -79,14 +83,11 @@ function createCtx(options: SendCtxOptions = {}) {
         calls.resolveAgent.push(sessionId)
         return { agent }
       },
-      inspect: async (sessionId: string): Promise<unknown> => {
-        calls.inspect.push(sessionId)
-        return { events: [] }
-      },
     },
     workspaceRegistry: options.workspaceRegistry ?? { archivedSessionIds: [] },
     agents: options.agents ?? { get: () => undefined },
     ...(options.sessions === undefined ? {} : { sessions: options.sessions }),
+    ...(options.sessionQuery === undefined ? {} : { sessionQuery: options.sessionQuery }),
   })
   return { ctx, calls, agent }
 }
@@ -122,7 +123,10 @@ function runWait(args: unknown, ctx: HostContext, exec: FakeExec = defaultExec):
 }
 
 function assistantMessage(text: string) {
-  return { type: 'assistant/message', data: { content: [{ type: 'text', text }] } }
+  return {
+    type: 'assistant/message',
+    data: { message: { role: 'assistant', content: [{ type: 'text', text }] } },
+  }
 }
 
 const confirmErrorText = (sessionId: string): string =>
@@ -514,6 +518,7 @@ describe('session_send / session_wake / session_wait', () => {
         get: (sessionId: string) =>
           sessionId === 'target'
             ? {
+                header: { id: 'target' },
                 snapshotEvents: () => [
                   { type: 'user/message', data: { content: [{ type: 'text', text: 'hello' }] } },
                   assistantMessage('first answer'),
@@ -530,19 +535,40 @@ describe('session_send / session_wake / session_wait', () => {
     assert.equal(text, '会话 target 已空闲\n- reply: latest answer')
   })
 
-  test('session_wait falls back to inspect when the session is not live', async () => {
-    const { ctx, calls } = createCtx({
+  test('session_wait reads a cold session through sessionQuery.observeSession', async () => {
+    let disposed = 0
+    const { ctx } = createCtx({
       agents: { get: () => ({ whenIdle: async () => {} }) },
+      sessionQuery: {
+        observeSession: async () => ({
+          header: { id: 'target' },
+          events: [assistantMessage('reply from the query service')],
+          [Symbol.dispose]: () => {
+            disposed += 1
+          },
+        }),
+      },
     })
-    ctx.sessionController.inspect = async (sessionId: string) => {
-      calls.inspect.push(sessionId)
-      return { events: [assistantMessage('reply from inspect')] }
-    }
 
     const text = await runWait({ session_id: 'target' }, ctx)
 
-    assert.deepEqual(calls.inspect, ['target'])
-    assert.equal(text, '会话 target 已空闲\n- reply: reply from inspect')
+    assert.equal(text, '会话 target 已空闲\n- reply: reply from the query service')
+    assert.equal(disposed, 1)
+  })
+
+  test('session_wait stays idle when the reply cannot be read', async () => {
+    const { ctx } = createCtx({
+      agents: { get: () => ({ whenIdle: async () => {} }) },
+      sessions: {
+        get: () => {
+          throw new Error('session store is offline')
+        },
+      },
+    })
+
+    const text = await runWait({ session_id: 'target' }, ctx)
+
+    assert.equal(text, '会话 target 已空闲')
   })
 
   test('session_wait reports idle without a reply line when there is no assistant message', async () => {
@@ -606,7 +632,9 @@ describe('session_send / session_wake / session_wait', () => {
     const longReply = 'x'.repeat(2500)
     const { ctx } = createCtx({
       agents: { get: () => ({ whenIdle: async () => {} }) },
-      sessions: { get: () => ({ snapshotEvents: () => [assistantMessage(longReply)] }) },
+      sessions: {
+        get: () => ({ header: { id: 'target' }, snapshotEvents: () => [assistantMessage(longReply)] }),
+      },
     })
 
     const tool = toolByName(ctx, 'session_wait')

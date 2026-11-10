@@ -81,6 +81,7 @@ DeepSeek Harness（DSH）的跨会话工具插件：查看、创建、管理会�
 - `session_update` 未提供任何更新字段时返回 `session-hub: nothing to update`；`workspace` 与 `cwd` 同时提供时 `session_create` 返回 `session-hub: workspace and cwd are mutually exclusive`。
 - `session_create` 省略 `workspace` / `cwd` 时使用调用方 cwd；`provider` / `reasoning_effort` 都要求同时提供 `model`，省略 `provider` 时会在模型目录中解析唯一提供该模型的 provider。
 - `session_get` 只统计 user / assistant 消息，每条截断 500 字符。
+- `session_get` 通过 `sessions`（live 会话）或 `sessionQuery.observeSession`（cold 会话）读取会话头与事件；读取失败返回 `session-hub: GET_FAILED: <原始错误>`，不再把任何失败都伪装成 `not found`。
 - `session_list` 的 `owner: self` 表示"调用方自己创建的会话"；`any` 是默认值，不做所有者过滤。
 - `session_search` 每个会话只渲染一条最佳命中片段（截断 200 字符），摘要格式为 `共 N 条命中，涉及 M 个会话（显示 K 个）`：N 是宿主原始命中条数，M 是去重后的会话数，K 是实际渲染行数。
 
@@ -106,6 +107,7 @@ DeepSeek Harness（DSH）的跨会话工具插件：查看、创建、管理会�
 
 - 通过宿主的 `agent.whenIdle()` 等待目标变为空闲；`timeout_ms` 默认 120000，夹紧到 1000–600000，非法值回落到默认值。
 - 变为空闲后读取目标最新的一条 assistant 消息，截断 2000 字符，渲染为 `会话 <id> 已空闲`（有回复时追加 `- reply: ...`）。
+- 回复与会话头使用与 `session_get` 相同的读取路径：live 会话读 `sessions`，cold 会话读 `sessionQuery.observeSession`；读取失败时仍返回空闲状态，只是不再附带 `- reply`。
 - 归档会话立即返回 `会话 <id> 已归档，不会运行`；目标未加载（cold）立即返回 `会话 <id> 空闲（未加载）`。
 - 超时返回 `session-hub: WAIT_TIMEOUT: session "<id>" did not become idle within <n>ms`。
 - 它不是请求/响应关联：只保证"等待结束时目标空闲"，取回的回复可能来自更早的回合；宿主 agent 没有 `whenIdle` 能力时视为立即空闲。
@@ -163,7 +165,7 @@ ${DSH_HOME:-~/.dsh}/storages/session-hub/owners.json
 pnpm install   # 安装 TypeScript、tsx 与宿主类型包
 pnpm check     # tsc --noEmit，检查 src 与 test 类型
 pnpm build     # rimraf lib 后 tsc -p tsconfig.build.json，src/ → lib/
-pnpm test      # tsx --test，全部 182 个测试
+pnpm test      # tsx --test，全部 191 个测试
 ```
 
 安装到指定 profile（`lib/` 已被 gitignore，必须先构建）：
@@ -187,7 +189,7 @@ dsh plugin --profile <name> add link:D:\myprojects\projects\dsh-plugins\packages
 - **所有权覆盖不完整**：只记录本插件 `session_create` 创建的会话；插件启用前存在的会话永远需要 `confirm`（owned 模式）。
 - **索引会累积且无跨进程锁**：已删除会话的记录不会自动清理；多个 DSH 进程写同一 `DSH_HOME` 时可能互相覆盖。
 - **输出为纯文本且截断**：列表最多 200 行；`session_get` 最近消息最多 20 条、每条 500 字符；`session_wait` 回复最多 2000 字符；`session_search` 片段最多 200 字符，且没有结构化输出字段。
-- **依赖宿主服务**：某些 profile 可能不提供 `sessionController`、`workspaceController` 或 `sessionQuery`，相关工具会返回服务不可用的错误文本。
+- **依赖宿主服务**：某些 profile 可能不提供 `sessionController`、`workspaceController`、`sessions` 或 `sessionQuery`，相关工具会返回服务不可用的错误文本；`session_get` / `session_wait` 的会话读取需要 `sessions` 或 `sessionQuery` 至少有一个可用。
 - **`steer` 会影响正在运行的回合**：消息插入目标下一步，可能改变其当前任务走向。
 - **没有发送预算**：不限制消息条数、频率或目标数量，需要节制时由调用方自行控制。
 - **`confirm` 不是安全边界**：它只用于防止误操作，不能阻止有意操作。

@@ -24,10 +24,10 @@ import type { AgentStatus } from '@deepseek-ai/dsh-agent'
 import { requireController, serviceOf } from '../host/services.js'
 import type { AgentResolution, AgentRegistry, TargetAgent } from '../host/contracts.js'
 import {
-  extractMessageText,
+  eventMessageText,
   lastAssistantEvent,
   readArchivedIds,
-  readSessionEvents,
+  readSessionSnapshot,
 } from '../host/session-access.js'
 import {
   DEFAULT_TIMEOUT_MS,
@@ -169,15 +169,25 @@ export async function waitForIdle(
   return { status: WaitOutcome.Idle, reply: await readLastAssistantText(ctx, sessionId) }
 }
 
-/** The latest assistant message of a session, or `''` when there is none. */
+/**
+ * The latest assistant message of a session, or `''` when it cannot be read.
+ *
+ * A wait already succeeded once the target is idle, so an unreadable reply is
+ * reported as "no reply" rather than turning the wait into a failure. The read
+ * goes through the session store or query service, never through inspection.
+ */
 export async function readLastAssistantText(
   ctx: HostContext,
   sessionId: string,
 ): Promise<string> {
-  const events = await readSessionEvents(ctx, sessionId)
-  const message = lastAssistantEvent(events)
-  if (message === undefined) return ''
-  return extractMessageText(message.data?.content)
+  try {
+    const snapshot = await readSessionSnapshot(ctx, sessionId)
+    const message = lastAssistantEvent(snapshot.events)
+    if (message === undefined) return ''
+    return eventMessageText(message)
+  } catch {
+    return ''
+  }
 }
 
 /**

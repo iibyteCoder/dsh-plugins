@@ -149,6 +149,12 @@ export interface SessionEventView {
 export interface SessionEventData {
   readonly content?: unknown
   readonly source?: SessionEventSource
+  /** The assistant message wrapper: `assistant/message` stores its content here. */
+  readonly message?: SessionEventMessage
+}
+
+export interface SessionEventMessage {
+  readonly content?: unknown
 }
 
 export interface SessionEventSource {

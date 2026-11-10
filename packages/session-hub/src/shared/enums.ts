@@ -38,6 +38,7 @@ export enum ErrorCode {
   SelfCloseForbidden = 'SELF_CLOSE_FORBIDDEN',
   SelfTarget = 'SELF_TARGET',
   SessionArchived = 'SESSION_ARCHIVED',
+  GetFailed = 'GET_FAILED',
   WaitTimeout = 'WAIT_TIMEOUT',
   SearchUnavailable = 'SEARCH_UNAVAILABLE',
   SearchFailed = 'SEARCH_FAILED',

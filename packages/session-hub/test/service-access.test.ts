@@ -45,7 +45,17 @@ const session = {
 const workspace = { id: 'ws-alpha', title: 'Workspace One', path: rootDir, sessionIds: ['s1'] }
 const reply = {
   type: 'assistant/message',
-  data: { content: [{ type: 'text', text: 'on it' }] },
+  data: { message: { role: 'assistant', content: [{ type: 'text', text: 'on it' }] } },
+}
+const sessionHeader = {
+  version: 4,
+  id: 's1',
+  createdAt,
+  cwd: rootDir,
+  parentSession: 's0',
+  isSeeded: false,
+  origin: 'subagent',
+  agentPreset: 'default',
 }
 
 /**
@@ -159,21 +169,6 @@ function createHostServices(overrides: HostServiceOverrides = {}): {
   const services: Record<string, unknown> = {
     sessionController: {
       list: async () => ({ items: [session] }),
-      inspect: async (id: string) => {
-        if (id !== 's1') throw new Error(`session ${id} not found`)
-        return {
-          meta: {
-            id: 's1',
-            createdAt,
-            cwd: rootDir,
-            parentSession: 's0',
-            origin: 'cli',
-            agentPreset: 'default',
-          },
-          inheritedEventCount: 0,
-          events: [],
-        }
-      },
       create: async (request: unknown) => {
         calls.create.push(request)
         return { sessionId: 'new-session' }
@@ -206,6 +201,11 @@ function createHostServices(overrides: HostServiceOverrides = {}): {
     sessionQuery: {
       searchSessions: async () => ({
         items: [{ header: { id: 's1' }, bestMatch: { sessionId: 's1', snippet: 'needle' } }],
+      }),
+      observeSession: async () => ({
+        header: sessionHeader,
+        events: [reply],
+        [Symbol.dispose]: () => {},
       }),
     },
     logger: { debug: () => {} },
@@ -395,7 +395,7 @@ describe('host service access', () => {
       agents: { get: (sessionId: string) => (sessionId === 'target' ? waitAgent : undefined) },
       sessions: {
         get: (sessionId: string) =>
-          sessionId === 'target' ? { snapshotEvents: () => [reply] } : undefined,
+          sessionId === 'target' ? { header: { id: 'target' }, snapshotEvents: () => [reply] } : undefined,
       },
     })
     const { ctx } = createHostContext(services)

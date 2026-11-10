@@ -6,7 +6,6 @@
  * never loads a second copy of a host package.
  */
 import type { AgentStatus } from '@deepseek-ai/dsh-agent'
-import type { Session } from '@deepseek-ai/dsh-session'
 import type { AgentMessage } from '../shared/types.js'
 
 /** The only list query this plugin issues: an unfiltered listing. */
@@ -32,7 +31,7 @@ export interface SessionSummaryMeta {
   readonly cwd?: unknown
 }
 
-/** The identity fields a listing row or inspection metadata may carry. */
+/** The identity fields a listing row or session header may carry. */
 export interface SessionIdentity {
   readonly sessionId?: unknown
   readonly id?: unknown
@@ -56,28 +55,6 @@ export interface SessionSummary extends SessionIdentity {
 
 export interface SessionListValue {
   readonly items?: unknown
-}
-
-export interface SessionInspectionMeta extends SessionIdentity {
-  readonly createdAt?: unknown
-  readonly created_at?: unknown
-  readonly cwd?: unknown
-  readonly parentSession?: unknown
-  readonly parentSessionId?: unknown
-  readonly origin?: unknown
-  readonly agentPreset?: unknown
-  readonly agentPresetId?: unknown
-}
-
-/** Result of `sessionController.inspect`. */
-export interface SessionInspection {
-  readonly meta?: SessionInspectionMeta
-  readonly createdAt?: unknown
-  readonly cwd?: unknown
-  readonly parentSession?: unknown
-  readonly origin?: unknown
-  readonly agentPreset?: unknown
-  readonly events?: unknown
 }
 
 export interface SessionCreateRequest {
@@ -143,7 +120,6 @@ export interface AgentResolution {
 
 export interface SessionController {
   list(query: SessionQuery): Promise<SessionListValue | undefined>
-  inspect(sessionId: string, signal?: AbortSignal): Promise<SessionInspection | null | undefined>
   create(request: SessionCreateRequest): Promise<SessionCreateValue | undefined>
   rename(request: SessionRenameRequest): Promise<unknown>
   selectModel(request: SessionSelectModelRequest): Promise<unknown>
@@ -177,11 +153,14 @@ export interface WorkspaceController {
   unarchiveSession(request: UnarchiveSessionRequest): Promise<unknown>
 }
 
-/** The live session view: only the event snapshot is read. */
-export type SessionSnapshot = Pick<Session, 'snapshotEvents'>
+/** The live session view: its durable header and event snapshot. */
+export interface LiveSession {
+  readonly header: Record<string, unknown>
+  snapshotEvents(): readonly unknown[]
+}
 
 export interface SessionRegistry {
-  get?(sessionId: string): SessionSnapshot | undefined
+  get?(sessionId: string): LiveSession | undefined
 }
 
 export interface AgentRegistry {
@@ -241,10 +220,35 @@ export interface SessionSearchExec {
   readonly signal?: AbortSignal
 }
 
-/** The one host search capability session-hub calls. */
+/** How much projection state one observation computes. */
+export type SessionProjectionMode = 'none' | 'all'
+
+/** Options of `sessionQuery.observeSession`. */
+export interface SessionObservationOptions {
+  readonly signal?: AbortSignal
+  readonly projectionMode?: SessionProjectionMode
+}
+
+/**
+ * One borrowed read cut of a session log.
+ *
+ * The host pins a cold observation until it is disposed, so a caller copies the
+ * header and events and then releases the lease in the same turn.
+ */
+export interface SessionObservation {
+  readonly header: Record<string, unknown>
+  readonly events: readonly unknown[]
+  readonly [Symbol.dispose]?: () => void
+}
+
+/** The host session-query capabilities session-hub calls. */
 export interface SessionQueryService {
   searchSessions(
     request: SessionSearchRequest,
     exec?: SessionSearchExec,
   ): Promise<SessionSearchResult | undefined>
+  observeSession?(
+    sessionId: string,
+    options?: SessionObservationOptions,
+  ): Promise<SessionObservation>
 }
