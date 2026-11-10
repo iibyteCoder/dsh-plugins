@@ -31,6 +31,7 @@ import {
   toolByName,
   type FakeExec,
 } from './helpers/fixtures.js'
+import { createSettings } from './helpers/settings.js'
 
 const callerId = 'caller'
 const rootDir = path.resolve('/fixtures/hub')
@@ -262,7 +263,7 @@ describe('host service access', () => {
     const { ctx } = createHostContext(services)
 
     const text = assertNoInjectFailure(
-      await executeTool(toolByName(createReadTools(ctx as unknown as HostContext), 'session_list'), {}, exec),
+      await executeTool(toolByName(createReadTools(ctx as unknown as HostContext, createSettings()), 'session_list'), {}, exec),
     )
 
     assert.match(text, /^ID\s+TITLE\s+WORKSPACE\s+CWD\s+STATUS\s+MODEL\s+OWNER\s+UPDATED/)
@@ -276,7 +277,7 @@ describe('host service access', () => {
 
     const text = assertNoInjectFailure(
       await executeTool(
-        toolByName(createReadTools(ctx as unknown as HostContext), 'session_get'),
+        toolByName(createReadTools(ctx as unknown as HostContext, createSettings()), 'session_get'),
         { session_id: 's1' },
         exec,
       ),
@@ -294,7 +295,7 @@ describe('host service access', () => {
 
     const text = assertNoInjectFailure(
       await executeTool(
-        createSearchTool(ctx as unknown as HostContext),
+        createSearchTool(ctx as unknown as HostContext, createSettings()),
         { query: 'needle' },
         exec,
       ),
@@ -311,7 +312,7 @@ describe('host service access', () => {
 
     const text = assertNoInjectFailure(
       await executeTool(
-        createSessionCreateTool(ctx as unknown as HostContext),
+        createSessionCreateTool(ctx as unknown as HostContext, createSettings()),
         { workspace: 'Workspace One', message: 'build it' },
         exec,
       ),
@@ -336,7 +337,7 @@ describe('host service access', () => {
 
     const text = assertNoInjectFailure(
       await executeTool(
-        toolByName(createManageTools(ctx as unknown as HostContext), 'session_close'),
+        toolByName(createManageTools(ctx as unknown as HostContext, createSettings()), 'session_close'),
         { session_id: 'target' },
         exec,
       ),
@@ -353,7 +354,7 @@ describe('host service access', () => {
 
     const text = assertNoInjectFailure(
       await executeTool(
-        toolByName(createSendTools(ctx as unknown as HostContext), 'session_send'),
+        toolByName(createSendTools(ctx as unknown as HostContext, createSettings()), 'session_send'),
         { session_id: 'target', message: 'hello there' },
         exec,
       ),
@@ -378,7 +379,7 @@ describe('host service access', () => {
 
     const text = assertNoInjectFailure(
       await executeTool(
-        toolByName(createSendTools(ctx as unknown as HostContext), 'session_wake'),
+        toolByName(createSendTools(ctx as unknown as HostContext, createSettings()), 'session_wake'),
         { session_id: 'target', message: 'hurry' },
         exec,
       ),
@@ -402,7 +403,7 @@ describe('host service access', () => {
 
     const text = assertNoInjectFailure(
       await executeTool(
-        toolByName(createSendTools(ctx as unknown as HostContext), 'session_wait'),
+        toolByName(createSendTools(ctx as unknown as HostContext, createSettings()), 'session_wait'),
         { session_id: 'target', timeout_ms: 1000 },
         exec,
       ),

@@ -5,6 +5,7 @@ import { after, beforeEach, describe, test } from 'node:test'
 
 import { ownerIndexPath } from '../src/host/owner-index.js'
 import { createReadTools } from '../src/tools/read.js'
+import { ToolName } from '../src/shared/enums.js'
 import type { HostContext } from '../src/shared/types.js'
 import {
   createTempHome,
@@ -14,9 +15,11 @@ import {
   toolByName,
   type FakeExec,
 } from './helpers/fixtures.js'
+import { createSettings } from './helpers/settings.js'
 
 const callerId = 'caller'
 const alphaDir = path.resolve('/fixtures/alpha')
+const betaDir = path.resolve('/fixtures/beta')
 const createdAt = Date.UTC(2026, 0, 2, 3, 4)
 
 /** A durable host session header, including the fields session_get renders. */
@@ -82,16 +85,21 @@ function createCtx(overrides: Record<string, unknown> = {}): HostContext {
 
 const exec: FakeExec = { agent: { id: callerId }, signal: undefined }
 
-function sessionGetTool(ctx: HostContext) {
-  return toolByName(createReadTools(ctx), 'session_get')
+function execWithCwd(cwd: string): FakeExec {
+  return { agent: { id: callerId, session: { header: { cwd } } }, signal: undefined }
+}
+
+function sessionGetTool(ctx: HostContext, settings = createSettings()) {
+  return toolByName(createReadTools(ctx, settings), 'session_get')
 }
 
 async function runGet(
   args: unknown,
   ctx: HostContext = createCtx(),
   context: FakeExec = exec,
+  settings = createSettings(),
 ): Promise<string> {
-  return executeTool(sessionGetTool(ctx), args, context)
+  return executeTool(sessionGetTool(ctx, settings), args, context)
 }
 
 function writeOwners(owners: Record<string, { ownerSessionId: string; createdAt?: number }>): void {
@@ -142,7 +150,10 @@ describe('session_get', () => {
     assert.match(text, /^- agentPreset: default$/m)
     assert.match(text, /^- status: running$/m)
     assert.match(text, /^- owner: self$/m)
-    assert.doesNotMatch(text, /最近消息：/)
+    // The configured default is ten recent messages, so both are rendered.
+    assert.match(text, /最近消息：/)
+    assert.match(text, /\[user:user\] hello there/)
+    assert.match(text, /\[assistant\] hi, how can I help\?/)
   })
 
   test('session_get includes the last two user/assistant messages only', async () => {
@@ -159,6 +170,92 @@ describe('session_get', () => {
 
     assert.match(text, /1\. \[assistant\] hi, how can I help\?/)
     assert.doesNotMatch(text, /hello there/)
+  })
+
+  test('the configured recent count is the default', async () => {
+    const settings = createSettings({ [ToolName.SessionGet]: { recent: 0 } })
+
+    const text = await runGet({ session_id: 's1' }, createCtx(), exec, settings)
+
+    assert.doesNotMatch(text, /最近消息：/)
+  })
+
+  test('the configured recent count is overridden by an explicit argument', async () => {
+    const settings = createSettings({ [ToolName.SessionGet]: { recent: 2 } })
+
+    const text = await runGet({ session_id: 's1', include_recent: 1 }, createCtx(), exec, settings)
+
+    assert.match(text, /1\. \[assistant\] hi, how can I help\?/)
+    assert.doesNotMatch(text, /hello there/)
+  })
+
+  test('scope "owned" rejects a session created by another session', async () => {
+    writeOwners({ s1: { ownerSessionId: 'other' } })
+    const settings = createSettings({ [ToolName.SessionGet]: { scope: 'owned' } })
+
+    const text = await runGet({ session_id: 's1' }, createCtx(), exec, settings)
+
+    assert.equal(
+      text,
+      'session-hub: SCOPE_DENIED: session "s1" is outside the configured read scope',
+    )
+  })
+
+  test('scope "owned" allows a session created by the caller', async () => {
+    const settings = createSettings({ [ToolName.SessionGet]: { scope: 'owned' } })
+
+    const text = await runGet({ session_id: 's1' }, createCtx(), exec, settings)
+
+    assert.match(text, /^- id: s1$/m)
+  })
+
+  test('scope "workspace" checks the caller and session cwd', async () => {
+    const settings = createSettings({ [ToolName.SessionGet]: { scope: 'workspace' } })
+
+    const allowed = await runGet({ session_id: 's1' }, createCtx(), execWithCwd(alphaDir), settings)
+    assert.match(allowed, /^- id: s1$/m)
+
+    const denied = await runGet({ session_id: 's1' }, createCtx(), execWithCwd(betaDir), settings)
+    assert.equal(
+      denied,
+      'session-hub: SCOPE_DENIED: session "s1" is outside the configured read scope',
+    )
+  })
+
+  test('filters.denySessions hides a session from session_get', async () => {
+    const settings = createSettings({}, { filters: { denySessions: ['s1'] } })
+
+    const text = await runGet({ session_id: 's1' }, createCtx(), exec, settings)
+
+    assert.equal(
+      text,
+      'session-hub: SCOPE_DENIED: session "s1" is outside the configured read scope',
+    )
+  })
+
+  test('filters.allowSessions hides a session that is not listed', async () => {
+    const settings = createSettings({}, { filters: { allowSessions: ['someone-else'] } })
+
+    const text = await runGet({ session_id: 's1' }, createCtx(), exec, settings)
+
+    assert.equal(
+      text,
+      'session-hub: SCOPE_DENIED: session "s1" is outside the configured read scope',
+    )
+  })
+
+  test('filters.allowWorkspaces matches the workspace of the session', async () => {
+    const allowed = createSettings({}, { filters: { allowWorkspaces: ['Alpha Workspace'] } })
+    const denied = createSettings({}, { filters: { allowWorkspaces: ['Beta Workspace'] } })
+
+    assert.match(
+      await runGet({ session_id: 's1' }, createCtx(), exec, allowed),
+      /^- id: s1$/m,
+    )
+    assert.equal(
+      await runGet({ session_id: 's1' }, createCtx(), exec, denied),
+      'session-hub: SCOPE_DENIED: session "s1" is outside the configured read scope',
+    )
   })
 
   test('session_get reads a cold session through sessionQuery.observeSession', async () => {

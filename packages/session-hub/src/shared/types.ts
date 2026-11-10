@@ -6,17 +6,8 @@
  * contracts (views, results, options) so no layer leaks an anonymous shape.
  */
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import type { MessageKind, PermissionMode, SessionEventKind, SessionStatus, WaitOutcome } from './enums.js'
-
-/** Plugin config as received by `apply`. */
-export interface PermissionConfig {
-  readonly permissionMode?: unknown
-}
-
-/** Resolved options passed to every tool factory. */
-export interface ToolOptions {
-  readonly permissionMode: PermissionMode
-}
+import type { WhenRunningPolicy } from '../config/resolve.js'
+import type { MessageKind, SessionEventKind, SessionStatus, WaitOutcome } from './enums.js'
 
 /** The single host capability `apply` requires through `inject`. */
 export interface ToolRegistrar {
@@ -100,6 +91,10 @@ export interface DeliveryOptions {
   readonly sessionId: string
   readonly text: string
   readonly senderId?: string
+  /** Whether the body carries the `Agent <id> sent a message:` prefix. */
+  readonly attribution?: boolean
+  /** How a running target is woken; idle targets always get a follow-up. */
+  readonly whenRunning?: WhenRunningPolicy
 }
 
 /** Result of a delivery attempt; failures are text, never exceptions. */

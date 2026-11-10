@@ -14,8 +14,8 @@
  * Message construction, agent resolution and wait/timeout handling live here
  * once so the tools only own validation and authorization.
  *
- * No `@deepseek-ai/*` module is imported at runtime: the user message is built
- * by hand with the host's shape so the plugin never shadows the host's copy.
+ * No host package is imported at runtime: the user message is built by hand
+ * with the host's shape so the plugin never shadows the host's copy.
  */
 import { randomUUID } from 'node:crypto'
 
@@ -69,15 +69,20 @@ export type AgentResolveResult = AgentResolved | AgentResolveFailure
 /**
  * Build the host user-message shape, attributed to the sending session.
  *
- * A known sender is announced in the body and carried in `source`; an unknown
- * sender (missing caller id) produces the same kind of message without an
- * identity claim.
+ * `attribution` controls only the body prefix: when it is false the source
+ * still records `agent-message` and `senderSessionId`, so the receiving side
+ * keeps the identity even though the text is not decorated.
  */
-export function buildAgentMessage(text: unknown, senderId = ''): AgentMessage {
+export function buildAgentMessage(
+  text: unknown,
+  senderId = '',
+  attribution = true,
+): AgentMessage {
   const sender = typeof senderId === 'string' ? senderId.trim() : ''
   const body = typeof text === 'string' ? text : String(text ?? '')
+  const attributed = attribution && sender !== ''
   const content = [
-    { type: 'text' as const, text: sender === '' ? body : `Agent ${sender} sent a message:\n\n${body}` },
+    { type: 'text' as const, text: attributed ? `Agent ${sender} sent a message:\n\n${body}` : body },
   ]
 
   const source: AgentMessageSource =
@@ -98,12 +103,12 @@ export async function deliver(
   ctx: HostContext,
   options: DeliveryOptions,
 ): Promise<DeliveryResult> {
-  const { sessionId, text, senderId = '' } = options
+  const { sessionId, text, senderId = '', attribution = true } = options
   const resolution = await resolveAgentFor(ctx, sessionId)
   if (resolution.error !== null) return { ok: false, text: resolution.error }
 
   try {
-    await resolution.agent.inject(buildAgentMessage(text, senderId))
+    await resolution.agent.inject(buildAgentMessage(text, senderId, attribution))
   } catch (error) {
     return { ok: false, text: sendFailure(errorMessage(error)) }
   }
@@ -114,21 +119,23 @@ export async function deliver(
 /**
  * Ask another session to process `text`.
  *
- * A running target is steered, so the message is delivered at the next step
- * boundary instead of interrupting the current one; an idle target gets a
- * follow-up turn.
+ * A running target is steered by default, so the message is delivered at the
+ * next step boundary instead of interrupting the current one; with
+ * `whenRunning: 'queue'` it is queued as a follow-up turn instead. An idle
+ * target always gets a follow-up turn.
  */
 export async function wake(ctx: HostContext, options: DeliveryOptions): Promise<DeliveryResult> {
-  const { sessionId, text, senderId = '' } = options
+  const { sessionId, text, senderId = '', attribution = true, whenRunning = 'steer' } = options
   const resolution = await resolveAgentFor(ctx, sessionId)
   if (resolution.error !== null) return { ok: false, text: resolution.error }
 
   const agent = resolution.agent
   const running = agent.status === RUNNING_AGENT_STATUS
-  const message = buildAgentMessage(text, senderId)
+  const steer = running && whenRunning === 'steer'
+  const message = buildAgentMessage(text, senderId, attribution)
 
   try {
-    if (running) {
+    if (steer) {
       await agent.steer(message)
     } else {
       await agent.followup(message)
@@ -138,21 +145,23 @@ export async function wake(ctx: HostContext, options: DeliveryOptions): Promise<
   }
 
   const targetState = running ? SessionStatus.Running : SessionStatus.Idle
-  const delivery = running ? DeliveryMode.Steer : DeliveryMode.Queue
+  const delivery = steer ? DeliveryMode.Steer : DeliveryMode.Queue
   return { ok: true, text: `已请求会话 ${sessionId} 处理消息（${targetState} → ${delivery}）` }
 }
 
 /**
- * Wait for a session to become idle and read its latest assistant reply.
+ * Wait for a session to become idle and optionally read its latest reply.
  *
  * An archived session can never run, and a session with no loaded agent has
  * nothing to wait for; both return immediately with a distinguishable status.
- * A timeout returns without touching the target.
+ * A timeout returns without touching the target. With `readReply: false` the
+ * wait still happens, but the session log is not read at all.
  */
 export async function waitForIdle(
   ctx: HostContext,
   sessionId: string,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  options: { readonly readReply?: boolean } = {},
 ): Promise<WaitResult> {
   if (readArchivedIds(ctx).includes(sessionId)) {
     return { status: WaitOutcome.Archived, reply: '' }
@@ -166,7 +175,11 @@ export async function waitForIdle(
   const becameIdle = await raceIdle(agent, clampTimeout(timeoutMs))
   if (!becameIdle) return { status: WaitOutcome.Timeout, reply: '' }
 
-  return { status: WaitOutcome.Idle, reply: await readLastAssistantText(ctx, sessionId) }
+  const readReply = options.readReply ?? true
+  return {
+    status: WaitOutcome.Idle,
+    reply: readReply ? await readLastAssistantText(ctx, sessionId) : '',
+  }
 }
 
 /**

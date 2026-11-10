@@ -7,7 +7,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import { buildAgentMessage, clampTimeout, deliver } from '../src/domain/messaging.js'
 import { ownerIndexPath, recordOwner } from '../src/host/owner-index.js'
 import { createSendTools } from '../src/tools/send.js'
-import { PermissionMode, SessionStatus } from '../src/shared/enums.js'
+import { SessionStatus } from '../src/shared/enums.js'
 import type { AgentMessage, HostContext } from '../src/shared/types.js'
 import {
   createTempHome,
@@ -18,9 +18,16 @@ import {
   type FakeExec,
 } from './helpers/fixtures.js'
 import { assertSupportedSchema } from './helpers/schema-guard.js'
+import { createSettings } from './helpers/settings.js'
 
 const callerId = 'caller'
 const defaultExec: FakeExec = { agent: { id: callerId } }
+
+/** The old "non-owned confirm policy" behaviour, now expressed as a confirm policy. */
+const OWNED_POLICY = { confirm: 'non-owned' } as const
+
+/** The old "never confirm policy" behaviour, now expressed as a confirm policy. */
+const PERMISSIVE_POLICY = {} as const
 
 interface FakeAgentOverrides {
   readonly status?: string | undefined
@@ -95,31 +102,36 @@ function createCtx(options: SendCtxOptions = {}) {
 function toolByName(
   ctx: HostContext,
   toolName: string,
-  permissionMode: PermissionMode = PermissionMode.Permissive,
+  policy: Readonly<Record<string, unknown>> = PERMISSIVE_POLICY,
 ): ToolDefinition {
-  return findTool(createSendTools(ctx, { permissionMode }), toolName)
+  return findTool(createSendTools(ctx, createSettings({ [toolName]: policy })), toolName)
 }
 
 function runSend(
   args: unknown,
   ctx: HostContext,
-  permissionMode: PermissionMode = PermissionMode.Permissive,
+  policy: Readonly<Record<string, unknown>> = PERMISSIVE_POLICY,
   exec: FakeExec = defaultExec,
 ): Promise<string> {
-  return executeTool(toolByName(ctx, 'session_send', permissionMode), args, exec)
+  return executeTool(toolByName(ctx, 'session_send', policy), args, exec)
 }
 
 function runWake(
   args: unknown,
   ctx: HostContext,
-  permissionMode: PermissionMode = PermissionMode.Permissive,
+  policy: Readonly<Record<string, unknown>> = PERMISSIVE_POLICY,
   exec: FakeExec = defaultExec,
 ): Promise<string> {
-  return executeTool(toolByName(ctx, 'session_wake', permissionMode), args, exec)
+  return executeTool(toolByName(ctx, 'session_wake', policy), args, exec)
 }
 
-function runWait(args: unknown, ctx: HostContext, exec: FakeExec = defaultExec): Promise<string> {
-  return executeTool(toolByName(ctx, 'session_wait'), args, exec)
+function runWait(
+  args: unknown,
+  ctx: HostContext,
+  exec: FakeExec = defaultExec,
+  policy: Readonly<Record<string, unknown>> = PERMISSIVE_POLICY,
+): Promise<string> {
+  return executeTool(toolByName(ctx, 'session_wait', policy), args, exec)
 }
 
 function assistantMessage(text: string) {
@@ -133,6 +145,9 @@ const confirmErrorText = (sessionId: string): string =>
   `session-hub: CONFIRM_REQUIRED: session "${sessionId}" is not owned by the calling session`
 
 const selfTargetText = 'session-hub: SELF_TARGET: a session cannot send a message to itself'
+
+const targetNotAllowedText = (sessionId: string): string =>
+  `session-hub: TARGET_NOT_ALLOWED: session "${sessionId}" is not owned by the calling session`
 
 const archivedText = (sessionId: string): string =>
   `session-hub: SESSION_ARCHIVED: session "${sessionId}" is archived; call session_open first`
@@ -257,38 +272,38 @@ describe('session_send / session_wake / session_wait', () => {
     assert.deepEqual(calls.resolveAgent, [])
   })
 
-  test('session_send in owned mode rejects a non-owner without confirmation', async () => {
+  test('session_send in non-owned confirm policy rejects a non-owner without confirmation', async () => {
     await recordOwner('target', 'other')
     const { ctx, calls } = createCtx()
 
-    const text = await runSend({ session_id: 'target', message: 'hello' }, ctx, PermissionMode.Owned)
+    const text = await runSend({ session_id: 'target', message: 'hello' }, ctx, OWNED_POLICY)
 
     assert.equal(text, confirmErrorText('target'))
     assert.deepEqual(calls.resolveAgent, [])
   })
 
-  test('session_send in owned mode does not accept the string "true" as confirmation', async () => {
+  test('session_send in non-owned confirm policy does not accept the string "true" as confirmation', async () => {
     await recordOwner('target', 'other')
     const { ctx, calls } = createCtx()
 
     const text = await runSend(
       { session_id: 'target', message: 'hello', confirm: 'true' },
       ctx,
-      PermissionMode.Owned,
+      OWNED_POLICY,
     )
 
     assert.equal(text, confirmErrorText('target'))
     assert.deepEqual(calls.resolveAgent, [])
   })
 
-  test('session_send in owned mode allows a non-owner with confirm: true', async () => {
+  test('session_send in non-owned confirm policy allows a non-owner with confirm: true', async () => {
     await recordOwner('target', 'other')
     const { ctx, calls } = createCtx()
 
     const text = await runSend(
       { session_id: 'target', message: 'hello', confirm: true },
       ctx,
-      PermissionMode.Owned,
+      OWNED_POLICY,
     )
 
     assert.deepEqual(calls.resolveAgent, ['target'])
@@ -296,7 +311,7 @@ describe('session_send / session_wake / session_wait', () => {
     assert.equal(text, '已向会话 target 投递消息（不唤醒）')
   })
 
-  test('session_send in permissive mode sends to a session created by another session', async () => {
+  test('session_send in never confirm policy sends to a session created by another session', async () => {
     await recordOwner('target', 'other')
     const { ctx, calls } = createCtx()
 
@@ -317,11 +332,11 @@ describe('session_send / session_wake / session_wait', () => {
     assert.deepEqual(calls.resolveAgent, [])
   })
 
-  test('session_send checks ownership before the archive gate in owned mode', async () => {
+  test('session_send checks ownership before the archive gate in non-owned confirm policy', async () => {
     await recordOwner('target', 'other')
     const { ctx, calls } = createCtx({ workspaceRegistry: { archivedSessionIds: ['target'] } })
 
-    const text = await runSend({ session_id: 'target', message: 'hello' }, ctx, PermissionMode.Owned)
+    const text = await runSend({ session_id: 'target', message: 'hello' }, ctx, OWNED_POLICY)
 
     assert.equal(text, confirmErrorText('target'))
     assert.deepEqual(calls.resolveAgent, [])
@@ -442,25 +457,25 @@ describe('session_send / session_wake / session_wait', () => {
     assert.deepEqual(calls.resolveAgent, [])
   })
 
-  test('session_wake in owned mode rejects a non-owner without confirmation', async () => {
+  test('session_wake in non-owned confirm policy rejects a non-owner without confirmation', async () => {
     await recordOwner('target', 'other')
     const { ctx, calls } = createCtx()
 
-    const text = await runWake({ session_id: 'target', message: 'hello' }, ctx, PermissionMode.Owned)
+    const text = await runWake({ session_id: 'target', message: 'hello' }, ctx, OWNED_POLICY)
 
     assert.equal(text, confirmErrorText('target'))
     assert.deepEqual(calls.resolveAgent, [])
     assert.deepEqual(calls.followup, [])
   })
 
-  test('session_wake in owned mode allows a non-owner with confirm: true', async () => {
+  test('session_wake in non-owned confirm policy allows a non-owner with confirm: true', async () => {
     await recordOwner('target', 'other')
     const { ctx, calls } = createCtx()
 
     const text = await runWake(
       { session_id: 'target', message: 'hello', confirm: true },
       ctx,
-      PermissionMode.Owned,
+      OWNED_POLICY,
     )
 
     assert.equal(calls.followup.length, 1)
@@ -660,14 +675,227 @@ describe('session_send / session_wake / session_wait', () => {
     assert.equal(clampTimeout(5000.9), 5000)
   })
 
+  // --- policy ---------------------------------------------------------------
+
+  test('targets "owned" rejects a non-owner even with confirm: true', async () => {
+    await recordOwner('target', 'other')
+    const { ctx, calls } = createCtx()
+
+    const text = await runSend(
+      { session_id: 'target', message: 'hello', confirm: true },
+      ctx,
+      { targets: 'owned' },
+    )
+
+    assert.equal(text, targetNotAllowedText('target'))
+    assert.deepEqual(calls.resolveAgent, [])
+  })
+
+  test('targets "owned" allows the owner', async () => {
+    await recordOwner('target', callerId)
+    const { ctx, calls } = createCtx()
+
+    const text = await runSend(
+      { session_id: 'target', message: 'hello' },
+      ctx,
+      { targets: 'owned' },
+    )
+
+    assert.equal(text, '已向会话 target 投递消息（不唤醒）')
+    assert.equal(calls.inject.length, 1)
+  })
+
+  test('confirm "always" requires confirmation even for the owner', async () => {
+    await recordOwner('target', callerId)
+    const { ctx, calls } = createCtx()
+
+    const denied = await runSend(
+      { session_id: 'target', message: 'hello' },
+      ctx,
+      { confirm: 'always' },
+    )
+    assert.equal(denied, confirmErrorText('target'))
+    assert.deepEqual(calls.inject, [])
+
+    const allowed = await runSend(
+      { session_id: 'target', message: 'hello', confirm: true },
+      ctx,
+      { confirm: 'always' },
+    )
+    assert.equal(allowed, '已向会话 target 投递消息（不唤醒）')
+    assert.equal(calls.inject.length, 1)
+  })
+
+  test('allowSelf: true lets send target the caller', async () => {
+    const { ctx, calls } = createCtx()
+
+    const text = await runSend({ session_id: callerId, message: 'loop' }, ctx, { allowSelf: true })
+
+    assert.equal(text, '已向会话 caller 投递消息（不唤醒）')
+    assert.equal(calls.inject.length, 1)
+  })
+
+  test('allowSelf: true lets wake target the caller', async () => {
+    const { ctx, calls } = createCtx()
+
+    const text = await runWake({ session_id: callerId, message: 'loop' }, ctx, { allowSelf: true })
+
+    assert.equal(text, '已请求会话 caller 处理消息（idle → followup）')
+    assert.equal(calls.followup.length, 1)
+  })
+
+  test('allowArchived: true lets send reach an archived session', async () => {
+    await recordOwner('target', callerId)
+    const { ctx, calls } = createCtx({ workspaceRegistry: { archivedSessionIds: ['target'] } })
+
+    const text = await runSend(
+      { session_id: 'target', message: 'hello' },
+      ctx,
+      { allowArchived: true },
+    )
+
+    assert.equal(text, '已向会话 target 投递消息（不唤醒）')
+    assert.equal(calls.inject.length, 1)
+  })
+
+  test('allowArchived: true lets wake reach an archived session', async () => {
+    await recordOwner('target', callerId)
+    const { ctx, calls } = createCtx({ workspaceRegistry: { archivedSessionIds: ['target'] } })
+
+    const text = await runWake(
+      { session_id: 'target', message: 'hello' },
+      ctx,
+      { allowArchived: true },
+    )
+
+    assert.equal(text, '已请求会话 target 处理消息（idle → followup）')
+    assert.equal(calls.followup.length, 1)
+  })
+
+  test('attribution: false drops the prefix but keeps the source sender', async () => {
+    await recordOwner('target', callerId)
+    const { ctx, calls } = createCtx()
+
+    await runSend({ session_id: 'target', message: 'hello there' }, ctx, { attribution: false })
+
+    const message = calls.inject[0]!
+    assert.deepEqual(message.content, [{ type: 'text', text: 'hello there' }])
+    assert.equal(message.source.kind, 'agent-message')
+    assert.equal(message.source.senderSessionId, callerId)
+  })
+
+  test('whenRunning "queue" follows up on a running target', async () => {
+    await recordOwner('target', callerId)
+    const { ctx, calls } = createCtx({ agent: { status: SessionStatus.Running } })
+
+    const text = await runWake(
+      { session_id: 'target', message: 'hurry' },
+      ctx,
+      { whenRunning: 'queue' },
+    )
+
+    assert.equal(text, '已请求会话 target 处理消息（running → followup）')
+    assert.equal(calls.followup.length, 1)
+    assert.equal(calls.steer.length, 0)
+  })
+
+  test('wait.reply: false does not read the session log', async () => {
+    let reads = 0
+    const { ctx } = createCtx({
+      agents: { get: () => ({ whenIdle: async () => {} }) },
+      sessions: {
+        get: () => {
+          reads += 1
+          throw new Error('the reply must not be read')
+        },
+      },
+    })
+
+    const text = await runWait({ session_id: 'target' }, ctx, defaultExec, { reply: false })
+
+    assert.equal(text, '会话 target 已空闲')
+    assert.equal(reads, 0)
+  })
+
+  test('wait.replyMaxChars truncates the reply', async () => {
+    const { ctx } = createCtx({
+      agents: { get: () => ({ whenIdle: async () => {} }) },
+      sessions: {
+        get: () => ({ header: { id: 'target' }, snapshotEvents: () => [assistantMessage('abcdef')] }),
+      },
+    })
+
+    const text = await runWait({ session_id: 'target' }, ctx, defaultExec, { replyMaxChars: 3 })
+
+    assert.equal(text, '会话 target 已空闲\n- reply: abc…')
+  })
+
+  test('session_wait enforces its targets and confirm policy', async () => {
+    await recordOwner('target', 'other')
+
+    const targetDenied = await runWait(
+      { session_id: 'target' },
+      createCtx().ctx,
+      defaultExec,
+      { targets: 'owned' },
+    )
+    assert.equal(targetDenied, targetNotAllowedText('target'))
+
+    const confirmDenied = await runWait(
+      { session_id: 'target' },
+      createCtx().ctx,
+      defaultExec,
+      { confirm: 'always' },
+    )
+    assert.equal(confirmDenied, confirmErrorText('target'))
+
+    const { ctx } = createCtx({ agents: { get: () => ({ whenIdle: async () => {} }) } })
+    const allowed = await runWait(
+      { session_id: 'target', confirm: true },
+      ctx,
+      defaultExec,
+      { confirm: 'always' },
+    )
+    assert.equal(allowed, '会话 target 已空闲')
+  })
+
+  test('timeoutMaxMs caps an explicit timeout', async () => {
+    const { ctx } = createCtx({
+      agents: { get: () => ({ whenIdle: () => new Promise<void>(() => {}) }) },
+    })
+
+    const startedAt = Date.now()
+    const text = await runWait(
+      { session_id: 'target', timeout_ms: 600000 },
+      ctx,
+      defaultExec,
+      { timeoutMaxMs: 1000 },
+    )
+    const elapsed = Date.now() - startedAt
+
+    assert.equal(
+      text,
+      'session-hub: WAIT_TIMEOUT: session "target" did not become idle within 1000ms',
+    )
+    assert.ok(elapsed >= 900, `expected the 1000 ms cap, got ${elapsed} ms`)
+  })
+
   // --- schemas --------------------------------------------------------------
 
-  test('messaging tool schemas stay within the supported keyword subset in both modes', () => {
+  test('messaging tool schemas stay within the supported keyword subset for every policy', () => {
     const { ctx } = createCtx()
+    const variants = [
+      createSettings(),
+      createSettings({
+        session_send: { confirm: 'non-owned', allowSelf: true, allowArchived: true },
+        session_wake: { confirm: 'always', whenRunning: 'queue' },
+        session_wait: { reply: false, replyMaxChars: 100 },
+      }),
+    ]
 
-    for (const permissionMode of [PermissionMode.Permissive, PermissionMode.Owned]) {
-      for (const tool of createSendTools(ctx, { permissionMode })) {
-        const label = `${tool.name} (${permissionMode})`
+    for (const settings of variants) {
+      for (const tool of createSendTools(ctx, settings)) {
+        const label = tool.name
         assertSupportedSchema(tool.parameters, `${label}.parameters`)
         assertSupportedSchema(tool.output.schema, `${label}.output.schema`)
         for (const [name, schema] of Object.entries(parametersOf(tool).properties)) {
@@ -678,27 +906,29 @@ describe('session_send / session_wake / session_wait', () => {
     }
   })
 
-  test('permissive messaging schemas omit confirm', () => {
+  test('the default messaging schemas omit confirm', () => {
     const { ctx } = createCtx()
 
     for (const toolName of ['session_send', 'session_wake', 'session_wait']) {
-      const tool = toolByName(ctx, toolName, PermissionMode.Permissive)
+      const tool = toolByName(ctx, toolName, PERMISSIVE_POLICY)
       assert.equal('confirm' in parametersOf(tool).properties, false, `${toolName} must omit confirm`)
     }
   })
 
-  test('owned send and wake schemas declare confirm, wait never does', () => {
+  test('a non-owned or always confirm policy declares confirm, wait never does by default', () => {
     const { ctx } = createCtx()
-    const send = parametersOf(toolByName(ctx, 'session_send', PermissionMode.Owned))
-    const wake = parametersOf(toolByName(ctx, 'session_wake', PermissionMode.Owned))
-    const wait = parametersOf(toolByName(ctx, 'session_wait', PermissionMode.Owned))
+    const send = parametersOf(toolByName(ctx, 'session_send', OWNED_POLICY))
+    const wake = parametersOf(toolByName(ctx, 'session_wake', { confirm: 'always' }))
+    const wait = parametersOf(toolByName(ctx, 'session_wait', PERMISSIVE_POLICY))
+    const scopedWait = parametersOf(toolByName(ctx, 'session_wait', { confirm: 'always' }))
 
     assert.equal(send.properties.confirm?.type, 'boolean')
     assert.equal(wake.properties.confirm?.type, 'boolean')
     assert.equal('confirm' in wait.properties, false)
+    assert.equal(scopedWait.properties.confirm?.type, 'boolean')
   })
 
-  test('send and wake declare only a target and a message', () => {
+  test('send and wake declare only a target and a message by default', () => {
     const { ctx } = createCtx()
 
     for (const toolName of ['session_send', 'session_wake']) {

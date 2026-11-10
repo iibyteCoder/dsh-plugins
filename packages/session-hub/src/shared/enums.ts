@@ -6,12 +6,6 @@
  * the same spelling.
  */
 
-/** Which authorization surface the mutating tools expose. */
-export enum PermissionMode {
-  Permissive = 'permissive',
-  Owned = 'owned',
-}
-
 /** The public tool names registered with the host. */
 export enum ToolName {
   SessionList = 'session_list',
@@ -35,6 +29,8 @@ export enum ToolName {
  */
 export enum ErrorCode {
   ConfirmRequired = 'CONFIRM_REQUIRED',
+  TargetNotAllowed = 'TARGET_NOT_ALLOWED',
+  ScopeDenied = 'SCOPE_DENIED',
   SelfCloseForbidden = 'SELF_CLOSE_FORBIDDEN',
   SelfTarget = 'SELF_TARGET',
   SessionArchived = 'SESSION_ARCHIVED',

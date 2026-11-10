@@ -4,75 +4,64 @@
  * The three tools are deliberately separate, mirroring the host's own
  * vocabulary: send only delivers, wake asks the target to process the message
  * now, and wait only waits for idle. Authorization is enforced here against
- * the plugin's owner index before any host action.
+ * the plugin's owner index and the tool's own resolved policy before any host
+ * action.
  */
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
-import { confirmError, confirmRequired, ownerOf } from '../domain/ownership.js'
+import type { ResolvedSettings, ResolvedToolPolicy } from '../config/resolve.js'
+import { authorizeTarget } from '../domain/authorization.js'
 import { clampTimeout, deliver, waitForIdle, wake } from '../domain/messaging.js'
 import { renderText, renderWait } from '../format/renders.js'
 import { readArchivedIds } from '../host/session-access.js'
 import { asToolArgs, stringArg } from '../shared/args.js'
-import { ErrorCode, PermissionMode, ToolName } from '../shared/enums.js'
+import { ErrorCode, ToolName } from '../shared/enums.js'
 import { sessionHubError, sessionHubText, toErrorText } from '../shared/errors.js'
-import { DEFAULT_TIMEOUT_MS } from '../shared/limits.js'
+import { callerIdOf } from '../shared/exec.js'
+import { MIN_TIMEOUT_MS } from '../shared/limits.js'
 import type {
   AuthorizedTarget,
   AuthorizationResult,
   HostContext,
   ToolArgs,
   ToolExecContext,
-  ToolOptions,
 } from '../shared/types.js'
 
 const SESSION_SEND_DESCRIPTION = [
   'Deliver a message to another DeepSeek Harness session without waking it.',
   'The message is injected and the target is not started, and no reply is returned.',
   'Use session_wake when the target should process the message now.',
-  'Sending to itself is refused.',
-].join(' ')
-
-const SESSION_SEND_DESCRIPTION_OWNED = [
-  SESSION_SEND_DESCRIPTION,
-  'Sending to a session the caller did not create requires confirm: true.',
 ].join(' ')
 
 const SESSION_WAKE_DESCRIPTION = [
   'Ask another DeepSeek Harness session to process a message now.',
   'A running session is steered at its next step boundary; an idle session gets a follow-up turn.',
-  'Sending to itself is refused.',
-].join(' ')
-
-const SESSION_WAKE_DESCRIPTION_OWNED = [
-  SESSION_WAKE_DESCRIPTION,
-  'Waking a session the caller did not create requires confirm: true.',
 ].join(' ')
 
 const SESSION_WAIT_DESCRIPTION = [
-  'Wait for another DeepSeek Harness session to become idle and return its latest assistant reply (truncated to 2000 characters).',
-  'An archived session and a session that is not loaded return immediately. This tool needs no confirmation.',
+  'Wait for another DeepSeek Harness session to become idle and return its latest assistant reply.',
+  'An archived session and a session that is not loaded return immediately. This tool never asks for confirmation unless configured.',
 ].join(' ')
 
-/** Build the messaging session tools bound to a host context. */
-export function createSendTools(
-  ctx: HostContext,
-  options: ToolOptions = { permissionMode: PermissionMode.Permissive },
-): ToolDefinition[] {
+const SELF_TARGET_DESCRIPTION = 'Sending to itself is refused.'
+const ARCHIVED_DESCRIPTION = 'An archived target must be restored with session_open first.'
+
+/** Build the messaging session tools bound to a host context and config. */
+export function createSendTools(ctx: HostContext, settings: ResolvedSettings): ToolDefinition[] {
   return [
-    createSessionSendTool(ctx, options.permissionMode),
-    createSessionWakeTool(ctx, options.permissionMode),
-    createSessionWaitTool(ctx),
+    createSessionSendTool(ctx, settings.tools[ToolName.SessionSend]),
+    createSessionWakeTool(ctx, settings.tools[ToolName.SessionWake]),
+    createSessionWaitTool(ctx, settings.tools[ToolName.SessionWait]),
   ]
 }
 
-function createSessionSendTool(ctx: HostContext, permissionMode: PermissionMode): ToolDefinition {
-  const owned = permissionMode === PermissionMode.Owned
+function createSessionSendTool(ctx: HostContext, policy: ResolvedToolPolicy): ToolDefinition {
   return {
     name: ToolName.SessionSend,
-    description: owned ? SESSION_SEND_DESCRIPTION_OWNED : SESSION_SEND_DESCRIPTION,
+    description: messageDescription(SESSION_SEND_DESCRIPTION, policy),
     parameters: {
       type: 'object',
-      properties: messageProperties(owned, 'send to'),
+      properties: messageProperties(policy, 'send to'),
       required: ['session_id', 'message'],
     },
     output: {
@@ -81,7 +70,7 @@ function createSessionSendTool(ctx: HostContext, permissionMode: PermissionMode)
     },
     async execute(rawArgs, exec) {
       try {
-        return await executeSessionSend(ctx, rawArgs, exec, permissionMode)
+        return await executeSessionSend(ctx, rawArgs, exec, policy)
       } catch (error) {
         return toErrorText(error)
       }
@@ -89,14 +78,13 @@ function createSessionSendTool(ctx: HostContext, permissionMode: PermissionMode)
   } satisfies ToolDefinition
 }
 
-function createSessionWakeTool(ctx: HostContext, permissionMode: PermissionMode): ToolDefinition {
-  const owned = permissionMode === PermissionMode.Owned
+function createSessionWakeTool(ctx: HostContext, policy: ResolvedToolPolicy): ToolDefinition {
   return {
     name: ToolName.SessionWake,
-    description: owned ? SESSION_WAKE_DESCRIPTION_OWNED : SESSION_WAKE_DESCRIPTION,
+    description: messageDescription(SESSION_WAKE_DESCRIPTION, policy),
     parameters: {
       type: 'object',
-      properties: messageProperties(owned, 'wake'),
+      properties: messageProperties(policy, 'wake'),
       required: ['session_id', 'message'],
     },
     output: {
@@ -105,7 +93,7 @@ function createSessionWakeTool(ctx: HostContext, permissionMode: PermissionMode)
     },
     async execute(rawArgs, exec) {
       try {
-        return await executeSessionWake(ctx, rawArgs, exec, permissionMode)
+        return await executeSessionWake(ctx, rawArgs, exec, policy)
       } catch (error) {
         return toErrorText(error)
       }
@@ -113,32 +101,43 @@ function createSessionWakeTool(ctx: HostContext, permissionMode: PermissionMode)
   } satisfies ToolDefinition
 }
 
-function createSessionWaitTool(ctx: HostContext): ToolDefinition {
+function createSessionWaitTool(ctx: HostContext, policy: ResolvedToolPolicy): ToolDefinition {
+  const properties: Record<string, unknown> = {
+    session_id: {
+      type: 'string',
+      description: 'Session id to wait for.',
+    },
+    timeout_ms: {
+      type: 'integer',
+      description: `Maximum wait in milliseconds (default ${policy.timeoutMaxMs}, clamped to ${MIN_TIMEOUT_MS}..${policy.timeoutMaxMs}).`,
+      default: policy.timeoutMaxMs,
+    },
+  }
+  if (policy.confirm !== 'never') {
+    properties.confirm = {
+      type: 'boolean',
+      description:
+        policy.confirm === 'always'
+          ? 'Must be true to wait on any session.'
+          : 'Must be true to wait on a session the caller did not create.',
+    }
+  }
+
   return {
     name: ToolName.SessionWait,
     description: SESSION_WAIT_DESCRIPTION,
     parameters: {
       type: 'object',
-      properties: {
-        session_id: {
-          type: 'string',
-          description: 'Session id to wait for.',
-        },
-        timeout_ms: {
-          type: 'integer',
-          description: 'Maximum wait in milliseconds (default 120000, clamped to 1000..600000).',
-          default: DEFAULT_TIMEOUT_MS,
-        },
-      },
+      properties,
       required: ['session_id'],
     },
     output: {
       schema: { type: 'string' },
       render: renderText,
     },
-    async execute(rawArgs) {
+    async execute(rawArgs, exec) {
       try {
-        return await executeSessionWait(ctx, rawArgs)
+        return await executeSessionWait(ctx, rawArgs, exec, policy)
       } catch (error) {
         return toErrorText(error)
       }
@@ -146,11 +145,11 @@ function createSessionWaitTool(ctx: HostContext): ToolDefinition {
   } satisfies ToolDefinition
 }
 
-/**
- * The shared parameter set of send and wake; `confirm` only exists in owned
- * mode.
- */
-function messageProperties(owned: boolean, verb: string): Record<string, unknown> {
+/** The shared parameter set of send and wake. */
+function messageProperties(
+  policy: ResolvedToolPolicy,
+  verb: string,
+): Record<string, unknown> {
   const properties: Record<string, unknown> = {
     session_id: {
       type: 'string',
@@ -161,20 +160,36 @@ function messageProperties(owned: boolean, verb: string): Record<string, unknown
       description: 'Message text to deliver.',
     },
   }
-  if (owned) {
+  if (policy.confirm !== 'never') {
     properties.confirm = {
       type: 'boolean',
-      description: `Must be true to ${verb} a session the caller did not create.`,
+      description:
+        policy.confirm === 'always'
+          ? `Must be true to ${verb} any session.`
+          : `Must be true to ${verb} a session the caller did not create.`,
     }
   }
   return properties
+}
+
+/** Append the policy-dependent guidance to a static description. */
+function messageDescription(base: string, policy: ResolvedToolPolicy): string {
+  const parts = [base]
+  if (!policy.allowSelf) parts.push(SELF_TARGET_DESCRIPTION)
+  if (!policy.allowArchived) parts.push(ARCHIVED_DESCRIPTION)
+  if (policy.confirm === 'non-owned') {
+    parts.push('Acting on a session the caller did not create requires confirm: true.')
+  } else if (policy.confirm === 'always') {
+    parts.push('Every call requires confirm: true.')
+  }
+  return parts.join(' ')
 }
 
 async function executeSessionSend(
   ctx: HostContext,
   rawArgs: unknown,
   exec: ToolExecContext,
-  permissionMode: PermissionMode,
+  policy: ResolvedToolPolicy,
 ): Promise<string> {
   const args = asToolArgs(rawArgs)
 
@@ -183,10 +198,15 @@ async function executeSessionSend(
   const message = stringArg(args, 'message')
   if (message === '') return sessionHubText('message is required')
 
-  const target = await authorizedTarget(ctx, sessionId, args, exec, permissionMode)
+  const target = await authorizedTarget(ctx, sessionId, args, exec, policy, policy.allowSelf, true)
   if ('error' in target) return target.error
 
-  const result = await deliver(ctx, { sessionId, text: message, senderId: target.callerId })
+  const result = await deliver(ctx, {
+    sessionId,
+    text: message,
+    senderId: target.callerId,
+    attribution: policy.attribution,
+  })
   return result.text
 }
 
@@ -194,7 +214,7 @@ async function executeSessionWake(
   ctx: HostContext,
   rawArgs: unknown,
   exec: ToolExecContext,
-  permissionMode: PermissionMode,
+  policy: ResolvedToolPolicy,
 ): Promise<string> {
   const args = asToolArgs(rawArgs)
 
@@ -203,55 +223,66 @@ async function executeSessionWake(
   const message = stringArg(args, 'message')
   if (message === '') return sessionHubText('message is required')
 
-  const target = await authorizedTarget(ctx, sessionId, args, exec, permissionMode)
+  const target = await authorizedTarget(ctx, sessionId, args, exec, policy, policy.allowSelf, true)
   if ('error' in target) return target.error
 
-  const result = await wake(ctx, { sessionId, text: message, senderId: target.callerId })
+  const result = await wake(ctx, {
+    sessionId,
+    text: message,
+    senderId: target.callerId,
+    attribution: policy.attribution,
+    whenRunning: policy.whenRunning,
+  })
   return result.text
 }
 
-async function executeSessionWait(ctx: HostContext, rawArgs: unknown): Promise<string> {
+async function executeSessionWait(
+  ctx: HostContext,
+  rawArgs: unknown,
+  exec: ToolExecContext,
+  policy: ResolvedToolPolicy,
+): Promise<string> {
   const args = asToolArgs(rawArgs)
 
   const sessionId = stringArg(args, 'session_id')
   if (sessionId === '') return sessionHubText('session_id is required')
 
-  const timeoutMs = clampTimeout(args.timeout_ms)
-  const result = await waitForIdle(ctx, sessionId, timeoutMs)
-  return renderWait(sessionId, result.status, timeoutMs, result.reply)
+  const target = await authorizedTarget(ctx, sessionId, args, exec, policy, true, false)
+  if ('error' in target) return target.error
+
+  const timeoutMs = effectiveTimeout(policy, args.timeout_ms)
+  const result = await waitForIdle(ctx, sessionId, timeoutMs, { readReply: policy.reply })
+  return renderWait(sessionId, result.status, timeoutMs, result.reply, policy.replyMaxChars)
 }
 
 /**
- * Validate the parts shared by send and wake, in the documented order:
- * self-target, ownership (owned mode only), archive gate.
+ * Validate the parts shared by send, wake and wait, in the documented order:
+ * self-target (`allowSelf`), ownership (`targets`), `confirm`, then the
+ * archive gate (`allowArchived`) for the two tools that deliver messages.
  */
 async function authorizedTarget(
   ctx: HostContext,
   sessionId: string,
   args: ToolArgs,
   exec: ToolExecContext,
-  permissionMode: PermissionMode,
+  policy: ResolvedToolPolicy,
+  allowSelf: boolean,
+  enforceArchive: boolean,
 ): Promise<AuthorizationResult> {
   const callerId = callerIdOf(exec)
 
-  // A session messaging itself has no meaningful turn to wake; refuse before
-  // any ownership lookup or agent resolution.
-  if (sessionId === callerId) {
-    return {
-      error: sessionHubError(ErrorCode.SelfTarget, 'a session cannot send a message to itself'),
-    }
-  }
+  const denial = await authorizeTarget({
+    sessionId,
+    callerId,
+    targets: policy.targets,
+    confirm: policy.confirm,
+    allowSelf,
+    confirmGiven: args.confirm,
+    selfError: sessionHubError(ErrorCode.SelfTarget, 'a session cannot send a message to itself'),
+  })
+  if ('error' in denial) return { error: denial.error }
 
-  if (permissionMode === PermissionMode.Owned) {
-    const ownerId = await ownerOf(sessionId)
-    // `confirm` only counts when it is the boolean true; "true", 1 and the like
-    // must not be accepted as authorization.
-    if (confirmRequired(ownerId, callerId) && args.confirm !== true) {
-      return { error: confirmError(sessionId) }
-    }
-  }
-
-  if (readArchivedIds(ctx).includes(sessionId)) {
+  if (enforceArchive && !policy.allowArchived && readArchivedIds(ctx).includes(sessionId)) {
     return {
       error: sessionHubError(
         ErrorCode.SessionArchived,
@@ -260,10 +291,13 @@ async function authorizedTarget(
     }
   }
 
-  const authorized: AuthorizedTarget = { sessionId, callerId }
-  return authorized
+  const authorizedTarget: AuthorizedTarget = { sessionId, callerId }
+  return authorizedTarget
 }
 
-function callerIdOf(exec: ToolExecContext): string {
-  return typeof exec.agent?.id === 'string' ? exec.agent.id.trim() : ''
+/** Clamp the requested wait budget into `[MIN_TIMEOUT_MS, timeoutMaxMs]`. */
+function effectiveTimeout(policy: ResolvedToolPolicy, raw: unknown): number {
+  const cap = policy.timeoutMaxMs
+  const requested = raw === undefined || raw === null || raw === '' ? cap : clampTimeout(raw)
+  return Math.min(cap, Math.max(MIN_TIMEOUT_MS, requested))
 }

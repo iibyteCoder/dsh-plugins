@@ -6,6 +6,7 @@
  * means `session_update`, `session_close` and the messaging tools cannot drift
  * apart on who may act on a session.
  */
+import type { ConfirmPolicy, TargetPolicy } from '../config/resolve.js'
 import { readOwnerIndex } from '../host/owner-index.js'
 import { nonEmptyString } from '../shared/args.js'
 import { ErrorCode } from '../shared/enums.js'
@@ -26,24 +27,53 @@ export async function ownerOf(sessionId: string): Promise<string> {
   return typeof owner === 'string' ? owner : ''
 }
 
+/** True when the caller created the target (and both ids are usable). */
+export function ownedByCaller(ownerId: string, callerId: string): boolean {
+  const owner = nonEmptyString(ownerId)
+  const caller = nonEmptyString(callerId)
+  return owner !== '' && owner === caller
+}
+
+/**
+ * Decide whether `targets` permits acting on a session.
+ *
+ * `owned` restricts every target to sessions the caller created; `any` applies
+ * no ownership restriction. Only "the caller created this target" can satisfy
+ * `owned` — unknown ownership is treated as not owned.
+ */
+export function targetAllowed(ownerId: string, callerId: string, targets: TargetPolicy): boolean {
+  return targets === 'any' || ownedByCaller(ownerId, callerId)
+}
+
 /**
  * Decide whether an operation on a target session needs explicit confirmation.
  *
- * Unknown ownership, or ownership by a different session, always needs
- * confirmation. Only "the caller created this target" can be exempt; closing
- * the calling session itself is rejected before this check runs.
+ * - `never`: no confirmation is ever required;
+ * - `non-owned`: required unless the caller created the target;
+ * - `always`: required even for the caller's own sessions.
  */
-export function confirmRequired(ownerId: string, callerId: string): boolean {
-  const owner = nonEmptyString(ownerId)
-  const caller = nonEmptyString(callerId)
-  const ownedByCaller = owner !== '' && owner === caller
-  return !ownedByCaller
+export function confirmRequiredBy(
+  ownerId: string,
+  callerId: string,
+  confirm: ConfirmPolicy,
+): boolean {
+  if (confirm === 'never') return false
+  if (confirm === 'always') return true
+  return !ownedByCaller(ownerId, callerId)
 }
 
 /** Fixed authorization failure text shared by the mutating tools. */
 export function confirmError(sessionId: string): string {
   return sessionHubError(
     ErrorCode.ConfirmRequired,
+    `session "${sessionId}" is not owned by the calling session`,
+  )
+}
+
+/** Fixed `targets: owned` failure text shared by the mutating tools. */
+export function targetNotAllowedError(sessionId: string): string {
+  return sessionHubError(
+    ErrorCode.TargetNotAllowed,
     `session "${sessionId}" is not owned by the calling session`,
   )
 }

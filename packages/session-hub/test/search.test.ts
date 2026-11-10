@@ -3,7 +3,7 @@
  *
  * The host search service is faked at the `ctx.get` boundary so every
  * assertion sees both the outward text and the exact request the plugin sent —
- * which is where the permission mode becomes observable.
+ * which is where the read scope and filters become observable.
  */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -13,7 +13,7 @@ import { after, beforeEach, describe, test } from 'node:test'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import { ownerIndexPath } from '../src/host/owner-index.js'
-import { PermissionMode } from '../src/shared/enums.js'
+import { ToolName } from '../src/shared/enums.js'
 import type { HostContext } from '../src/shared/types.js'
 import { createTools } from '../src/tools/registry.js'
 import { createSearchTool } from '../src/tools/search.js'
@@ -24,9 +24,11 @@ import {
   serviceContext,
   type FakeExec,
 } from './helpers/fixtures.js'
+import { createSettings } from './helpers/settings.js'
 
 const callerId = 'caller'
 const alphaDir = path.resolve('/fixtures/alpha')
+const betaDir = path.resolve('/fixtures/beta')
 
 interface SearchFilter {
   readonly kind: string
@@ -54,12 +56,27 @@ interface SearchCall {
   readonly exec: unknown
 }
 
+interface TitleEntry {
+  readonly sessionId: string
+  readonly title: string
+  readonly cwd?: string
+  readonly workspaceId?: string
+}
+
+interface WorkspaceEntry {
+  readonly id: string
+  readonly title: string
+  readonly path: string
+  readonly sessionIds?: readonly string[]
+}
+
 interface HarnessOptions {
   readonly items?: readonly SearchItem[]
   readonly nextCursor?: string
   readonly searchError?: Error
   readonly withSearch?: boolean
-  readonly titles?: readonly { readonly sessionId: string; readonly title: string }[]
+  readonly titles?: readonly TitleEntry[]
+  readonly workspaces?: readonly WorkspaceEntry[]
 }
 
 interface Harness {
@@ -74,11 +91,17 @@ function createHarness(options: HarnessOptions = {}): Harness {
   const services: Record<string, unknown> = {
     sessionController: {
       list: async () => ({
-        items: titles.map(({ sessionId, title }) => ({
+        items: titles.map(({ sessionId, title, cwd, workspaceId }) => ({
           sessionId,
+          cwd,
+          workspaceId,
           projections: { values: { title } },
         })),
       }),
+    },
+    workspaceRegistry: {
+      list: async () => options.workspaces ?? [],
+      archivedSessionIds: [],
     },
   }
 
@@ -98,17 +121,21 @@ function createHarness(options: HarnessOptions = {}): Harness {
 
 const exec: FakeExec = { agent: { id: callerId }, signal: undefined }
 
-function searchTool(ctx: HostContext, permissionMode: PermissionMode): ToolDefinition {
-  return createSearchTool(ctx, { permissionMode })
+function execWithCwd(cwd: string): FakeExec {
+  return { agent: { id: callerId, session: { header: { cwd } } }, signal: undefined }
+}
+
+function searchTool(ctx: HostContext, settings = createSettings()): ToolDefinition {
+  return createSearchTool(ctx, settings)
 }
 
 async function runSearch(
   args: unknown,
   ctx: HostContext = createHarness().ctx,
-  permissionMode: PermissionMode = PermissionMode.Permissive,
+  settings = createSettings(),
   execContext: FakeExec = exec,
 ): Promise<string> {
-  return executeTool(searchTool(ctx, permissionMode), args, execContext)
+  return executeTool(searchTool(ctx, settings), args, execContext)
 }
 
 function writeOwners(owners: Record<string, { readonly ownerSessionId: string }>): void {
@@ -129,7 +156,7 @@ describe('session_search', () => {
     removeTempHome(tempHome)
   })
 
-  test('permissive search sends no id filter and deduplicates hits per session', async () => {
+  test('the default scope sends no id filter and deduplicates hits per session', async () => {
     const { ctx, calls } = createHarness({
       items: [
         { header: { id: 's1' }, bestMatch: { sessionId: 's1', snippet: 'first alpha' } },
@@ -160,30 +187,94 @@ describe('session_search', () => {
     assert.match(text, /共 5 条命中，涉及 3 个会话（显示 3 个）$/)
   })
 
-  test('owned search only asks for the caller and the sessions it created', async () => {
+  test('scope "owned" only asks for sessions the caller created', async () => {
     writeOwners({
       created: { ownerSessionId: callerId },
       foreign: { ownerSessionId: 'someone-else' },
     })
-    const { ctx, calls } = createHarness()
+    const { ctx, calls } = createHarness({
+      titles: [
+        { sessionId: callerId, title: 'Caller' },
+        { sessionId: 'created', title: 'Created' },
+        { sessionId: 'foreign', title: 'Foreign' },
+      ],
+    })
+    const settings = createSettings({ [ToolName.SessionSearch]: { scope: 'owned' } })
 
-    await runSearch({ query: 'needle' }, ctx, PermissionMode.Owned)
+    await runSearch({ query: 'needle' }, ctx, settings)
 
     assert.equal(calls.length, 1)
+    // Only the owner index counts; the caller's own unrecorded session is not
+    // "owned by the caller" and is therefore outside the scope.
     assert.deepEqual(calls[0]?.request.sessionFilters, [
-      { kind: 'id', values: [callerId, 'created'] },
+      { kind: 'id', values: ['created'] },
     ])
   })
 
-  test('owned search with an empty scope returns before calling searchSessions', async () => {
+  test('scope "owned" with an empty scope returns before calling searchSessions', async () => {
     const { ctx, calls } = createHarness()
+    const settings = createSettings({ [ToolName.SessionSearch]: { scope: 'owned' } })
 
-    const text = await runSearch(
-      { query: 'needle' },
-      ctx,
-      PermissionMode.Owned,
-      { agent: {} },
+    const text = await runSearch({ query: 'needle' }, ctx, settings, { agent: {} })
+
+    assert.deepEqual(calls, [])
+    assert.equal(text, '没有匹配的会话。')
+  })
+
+  test('scope "workspace" only asks for sessions at the caller cwd', async () => {
+    const { ctx, calls } = createHarness({
+      titles: [
+        { sessionId: 's1', title: 'Alpha', cwd: alphaDir },
+        { sessionId: 's2', title: 'Beta', cwd: betaDir },
+        { sessionId: 's3', title: 'Alpha sub', cwd: path.join(alphaDir, 'sub') },
+      ],
+    })
+    const settings = createSettings({ [ToolName.SessionSearch]: { scope: 'workspace' } })
+
+    await runSearch({ query: 'needle' }, ctx, settings, execWithCwd(alphaDir))
+
+    assert.deepEqual(calls[0]?.request.sessionFilters, [{ kind: 'id', values: ['s1'] }])
+  })
+
+  test('filters.denySessions and allowSessions become an id filter', async () => {
+    const { ctx, calls } = createHarness({
+      titles: [
+        { sessionId: 's1', title: 'One' },
+        { sessionId: 's2', title: 'Two' },
+        { sessionId: 's3', title: 'Three' },
+      ],
+    })
+    const settings = createSettings(
+      {},
+      { filters: { allowSessions: ['s1', 's2'], denySessions: ['s1'] } },
     )
+
+    await runSearch({ query: 'needle' }, ctx, settings)
+
+    assert.deepEqual(calls[0]?.request.sessionFilters, [{ kind: 'id', values: ['s2'] }])
+  })
+
+  test('filters.allowWorkspaces keeps sessions of the listed workspaces', async () => {
+    const workspaces = [{ id: 'ws-alpha', title: 'Alpha', path: alphaDir }]
+    const { ctx, calls } = createHarness({
+      workspaces,
+      titles: [
+        { sessionId: 's1', title: 'Alpha', cwd: alphaDir },
+        { sessionId: 's2', title: 'Beta', cwd: betaDir },
+      ],
+    })
+    const settings = createSettings({}, { filters: { allowWorkspaces: ['ws-alpha'] } })
+
+    await runSearch({ query: 'needle' }, ctx, settings)
+
+    assert.deepEqual(calls[0]?.request.sessionFilters, [{ kind: 'id', values: ['s1'] }])
+  })
+
+  test('a configured id scope that matches nothing returns before searching', async () => {
+    const { ctx, calls } = createHarness({ titles: [{ sessionId: 's2', title: 'Beta' }] })
+    const settings = createSettings({}, { filters: { allowSessions: ['s1'] } })
+
+    const text = await runSearch({ query: 'needle' }, ctx, settings)
 
     assert.deepEqual(calls, [])
     assert.equal(text, '没有匹配的会话。')
@@ -243,25 +334,33 @@ describe('session_search', () => {
     assert.match(text, /（还有更多结果，请缩小查询）$/)
   })
 
-  test('session_search schema only declares query, limit and cwd in both modes', () => {
-    for (const permissionMode of [PermissionMode.Permissive, PermissionMode.Owned]) {
-      const tool = searchTool(createHarness().ctx, permissionMode)
-      const parameters = tool.parameters as unknown as {
-        readonly required: readonly string[]
-        readonly properties: Record<string, Record<string, unknown>>
-      }
+  test('the configured limit is the default page size', async () => {
+    const { ctx, calls } = createHarness()
+    const settings = createSettings({ [ToolName.SessionSearch]: { limit: 7 } })
 
-      assert.equal(tool.name, 'session_search')
-      assert.deepEqual(parameters.required, ['query'])
-      assert.deepEqual(Object.keys(parameters.properties).sort(), ['cwd', 'limit', 'query'])
-      assert.equal('confirm' in parameters.properties, false, permissionMode)
-      assert.equal(parameters.properties.limit?.type, 'integer')
-      assert.equal(parameters.properties.limit?.default, 20)
-      assert.match(String(parameters.properties.limit?.description), /default 20, max 50/)
-    }
+    const text = await runSearch({ query: 'alpha' }, ctx, settings)
+
+    assert.equal(calls[0]?.request.limit, 7)
+    assert.equal(text, '没有匹配的会话。')
   })
 
-  test('the registry registers ten tools in both permission modes', () => {
+  test('session_search schema only declares query, limit and cwd', () => {
+    const tool = searchTool(createHarness().ctx)
+    const parameters = tool.parameters as unknown as {
+      readonly required: readonly string[]
+      readonly properties: Record<string, Record<string, unknown>>
+    }
+
+    assert.equal(tool.name, 'session_search')
+    assert.deepEqual(parameters.required, ['query'])
+    assert.deepEqual(Object.keys(parameters.properties).sort(), ['cwd', 'limit', 'query'])
+    assert.equal('confirm' in parameters.properties, false)
+    assert.equal(parameters.properties.limit?.type, 'integer')
+    assert.equal(parameters.properties.limit?.default, 20)
+    assert.match(String(parameters.properties.limit?.description), /default 20, max 50/)
+  })
+
+  test('the registry registers ten tools by default', () => {
     const expected = [
       'session_list',
       'session_get',
@@ -274,14 +373,10 @@ describe('session_search', () => {
       'session_wait',
       'session_search',
     ]
-    const ctx = createHarness().ctx
 
-    for (const permissionMode of [PermissionMode.Permissive, PermissionMode.Owned]) {
-      assert.deepEqual(
-        createTools(ctx, { permissionMode }).map((tool) => tool.name),
-        expected,
-        `unexpected tool list in ${permissionMode} mode`,
-      )
-    }
+    assert.deepEqual(
+      createTools(createHarness().ctx, createSettings()).map((tool) => tool.name),
+      expected,
+    )
   })
 })

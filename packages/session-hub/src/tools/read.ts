@@ -1,11 +1,14 @@
 /**
  * Read-only tools: `session_list` and `session_get`.
  *
- * Read tools are allowed on every session in both permission modes, so the
- * mode is accepted for a uniform factory signature but does not change them.
+ * Both honour the configured read `scope` and the global allow/deny filters;
+ * `session_list` additionally uses the configured `limit` and default `status`,
+ * and `session_get` the configured `recent` count. A session outside the read
+ * policy is reported as `SCOPE_DENIED` instead of being rendered.
  */
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
+import type { ResolvedSettings, ResolvedToolPolicy, StatusPolicy } from '../config/resolve.js'
 import { renderSessionDetail, renderSessionList, renderText } from '../format/renders.js'
 import { readOwnerIndex } from '../host/owner-index.js'
 import {
@@ -38,8 +41,8 @@ import {
   ToolName,
 } from '../shared/enums.js'
 import { errorMessage, sessionHubError, sessionHubText, toErrorText } from '../shared/errors.js'
+import { callerCwdOf, callerIdOf } from '../shared/exec.js'
 import {
-  DEFAULT_LIST_LIMIT,
   MAX_LIST_LIMIT,
   MAX_RECENT_MESSAGES,
   MIN_LIST_LIMIT,
@@ -52,9 +55,9 @@ import type {
   SessionMessageView,
   SessionView,
   ToolExecContext,
-  ToolOptions,
   WorkspaceFilter,
 } from '../shared/types.js'
+import { isSessionVisible, type VisibilityRules } from '../domain/visibility.js'
 
 const SESSION_LIST_DESCRIPTION = [
   'List DeepSeek Harness sessions with their workspace, cwd, status, model and owner.',
@@ -65,12 +68,13 @@ const SESSION_GET_DESCRIPTION = [
   'Show one DeepSeek Harness session: metadata, owner, status, and optionally the most recent user/assistant messages.',
 ].join(' ')
 
-/** Build the read-only session tools bound to a host context. */
-export function createReadTools(ctx: HostContext, _options?: ToolOptions): ToolDefinition[] {
-  return [createSessionListTool(ctx), createSessionGetTool(ctx)]
+/** Build the read-only session tools bound to a host context and config. */
+export function createReadTools(ctx: HostContext, settings: ResolvedSettings): ToolDefinition[] {
+  return [createSessionListTool(ctx, settings), createSessionGetTool(ctx, settings)]
 }
 
-function createSessionListTool(ctx: HostContext): ToolDefinition {
+function createSessionListTool(ctx: HostContext, settings: ResolvedSettings): ToolDefinition {
+  const policy = settings.tools[ToolName.SessionList]
   return {
     name: ToolName.SessionList,
     description: SESSION_LIST_DESCRIPTION,
@@ -104,12 +108,12 @@ function createSessionListTool(ctx: HostContext): ToolDefinition {
             SessionStatus.Archived,
             StatusFilter.All,
           ],
-          default: StatusFilter.All,
+          default: policy.status,
         },
         limit: {
           type: 'integer',
-          description: 'Maximum number of rows to return (default 30, max 200).',
-          default: DEFAULT_LIST_LIMIT,
+          description: `Maximum number of rows to return (default ${policy.limit}, max ${MAX_LIST_LIMIT}).`,
+          default: policy.limit,
         },
       },
       required: [],
@@ -120,7 +124,7 @@ function createSessionListTool(ctx: HostContext): ToolDefinition {
     },
     async execute(rawArgs, exec) {
       try {
-        return await executeSessionList(ctx, rawArgs, exec)
+        return await executeSessionList(ctx, settings, policy, rawArgs, exec)
       } catch (error) {
         return toErrorText(error)
       }
@@ -128,7 +132,8 @@ function createSessionListTool(ctx: HostContext): ToolDefinition {
   } satisfies ToolDefinition
 }
 
-function createSessionGetTool(ctx: HostContext): ToolDefinition {
+function createSessionGetTool(ctx: HostContext, settings: ResolvedSettings): ToolDefinition {
+  const policy = settings.tools[ToolName.SessionGet]
   return {
     name: ToolName.SessionGet,
     description: SESSION_GET_DESCRIPTION,
@@ -141,8 +146,8 @@ function createSessionGetTool(ctx: HostContext): ToolDefinition {
         },
         include_recent: {
           type: 'integer',
-          description: 'Number of most recent user/assistant messages to include (default 0, max 20).',
-          default: MIN_RECENT_MESSAGES,
+          description: `Number of most recent user/assistant messages to include (default ${policy.recent}, max ${MAX_RECENT_MESSAGES}).`,
+          default: policy.recent,
         },
       },
       required: ['session_id'],
@@ -153,7 +158,7 @@ function createSessionGetTool(ctx: HostContext): ToolDefinition {
     },
     async execute(rawArgs, exec) {
       try {
-        return await executeSessionGet(ctx, rawArgs, exec)
+        return await executeSessionGet(ctx, settings, policy, rawArgs, exec)
       } catch (error) {
         return toErrorText(error)
       }
@@ -163,6 +168,8 @@ function createSessionGetTool(ctx: HostContext): ToolDefinition {
 
 async function executeSessionList(
   ctx: HostContext,
+  settings: ResolvedSettings,
+  policy: ResolvedToolPolicy,
   rawArgs: unknown,
   exec: ToolExecContext,
 ): Promise<string> {
@@ -178,10 +185,16 @@ async function executeSessionList(
   const cwdFilter = stringArg(args, 'cwd') === '' ? null : cwdKey(args.cwd)
   const titleFilter = stringArg(args, 'title_contains').toLowerCase()
   const ownerFilter = buildOwnerFilter(args.owner)
-  const statusFilter = normalizeStatusFilter(args.status)
-  const limit = integerOption(args.limit, DEFAULT_LIST_LIMIT, MIN_LIST_LIMIT, MAX_LIST_LIMIT)
+  const statusFilter = normalizeStatusFilter(args.status, policy.status)
+  const limit = integerOption(args.limit, policy.limit, MIN_LIST_LIMIT, MAX_LIST_LIMIT)
 
-  const callerId = callerViewerId(exec)
+  const callerId = callerIdOf(exec)
+  const rules: VisibilityRules = {
+    scope: policy.scope,
+    callerId,
+    callerCwdKey: cwdKey(callerCwdOf(exec)),
+    filters: settings.filters,
+  }
   const items = await listSessionItems(controller)
 
   const views: SessionView[] = []
@@ -193,7 +206,11 @@ async function executeSessionList(
     const title = sessionTitle(item)
     const status = sessionStatus(item, archived)
     const ownerId = owners[id]?.ownerSessionId
+    const workspace = workspaceForSession(item, workspaces)
 
+    if (!isSessionVisible({ sessionId: id, ownerId: ownerId ?? '', cwd, workspace }, rules)) {
+      continue
+    }
     if (!passesWorkspaceFilter(item, workspaceFilter, workspaces)) continue
     if (cwdFilter !== null && cwdKey(cwd) !== cwdFilter) continue
     if (titleFilter !== '' && !title.toLowerCase().includes(titleFilter)) continue
@@ -201,7 +218,6 @@ async function executeSessionList(
     const wantedStatus = statusForFilter(statusFilter)
     if (wantedStatus !== undefined && status !== wantedStatus) continue
 
-    const workspace = workspaceForSession(item, workspaces)
     views.push({
       id,
       title,
@@ -219,6 +235,8 @@ async function executeSessionList(
 
 async function executeSessionGet(
   ctx: HostContext,
+  settings: ResolvedSettings,
+  policy: ResolvedToolPolicy,
   rawArgs: unknown,
   exec: ToolExecContext,
 ): Promise<string> {
@@ -240,12 +258,29 @@ async function executeSessionGet(
   const header = snapshot.header
   const id = sessionIdOf(header) || sessionId
   const ownerId = (await readOwnerIndex())[id]?.ownerSessionId
+  const callerId = callerIdOf(exec)
+  const workspaces = await loadWorkspaces(services.workspaces)
+  const workspace = workspaceForSession(
+    { sessionId: id, cwd: header.cwd, workspaceId: header.workspaceId },
+    workspaces,
+  )
+  const rules: VisibilityRules = {
+    scope: policy.scope,
+    callerId,
+    callerCwdKey: cwdKey(callerCwdOf(exec)),
+    filters: settings.filters,
+  }
+  const cwd = typeof header.cwd === 'string' ? header.cwd : ''
+
+  if (!isSessionVisible({ sessionId: id, ownerId: ownerId ?? '', cwd, workspace }, rules)) {
+    return sessionHubError(ErrorCode.ScopeDenied, `session "${id}" is outside the configured read scope`)
+  }
+
   const status = await resolveSessionStatus(services, services.controller, id)
-  const callerId = callerViewerId(exec)
 
   const recentCount = integerOption(
     args.include_recent,
-    MIN_RECENT_MESSAGES,
+    policy.recent,
     MIN_RECENT_MESSAGES,
     MAX_RECENT_MESSAGES,
   )
@@ -324,9 +359,8 @@ function passesOwnerFilter(ownerId: unknown, filter: string, callerId: string | 
   return ownerId === filter
 }
 
-function normalizeStatusFilter(raw: unknown): StatusFilter {
-  const value = nonEmptyString(raw)
-  switch (value) {
+function normalizeStatusFilter(raw: unknown, fallback: StatusPolicy): StatusFilter {
+  switch (nonEmptyString(raw)) {
     case StatusFilter.Running:
       return StatusFilter.Running
     case StatusFilter.Idle:
@@ -335,7 +369,24 @@ function normalizeStatusFilter(raw: unknown): StatusFilter {
       return StatusFilter.Blank
     case StatusFilter.Archived:
       return StatusFilter.Archived
+    case StatusFilter.All:
+      return StatusFilter.All
     default:
+      return statusFilterOf(fallback)
+  }
+}
+
+function statusFilterOf(value: StatusPolicy): StatusFilter {
+  switch (value) {
+    case 'running':
+      return StatusFilter.Running
+    case 'idle':
+      return StatusFilter.Idle
+    case 'blank':
+      return StatusFilter.Blank
+    case 'archived':
+      return StatusFilter.Archived
+    case 'all':
       return StatusFilter.All
   }
 }
@@ -358,8 +409,4 @@ function statusForFilter(filter: StatusFilter): SessionStatus | undefined {
 function ownerLabel(ownerId: unknown, callerId: string | undefined): string {
   if (typeof ownerId !== 'string' || ownerId === '') return '-'
   return ownerId === callerId ? 'self' : ownerId
-}
-
-function callerViewerId(exec: ToolExecContext): string | undefined {
-  return typeof exec.agent?.id === 'string' ? exec.agent.id : undefined
 }

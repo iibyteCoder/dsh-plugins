@@ -2,65 +2,59 @@
  * Mutating session tools: `session_update`, `session_close`, `session_open`.
  *
  * Authorization is enforced here against the plugin's owner index, before any
- * host change is attempted. The tools never throw: every failure is rendered
- * as `session-hub: ...` text so a misbehaving call cannot take down the agent.
+ * host change is attempted. Each tool reads its own resolved policy for
+ * `targets`, `confirm` and (where it applies) `allowSelf`. The tools never
+ * throw: every failure is rendered as `session-hub: ...` text so a misbehaving
+ * call cannot take down the agent.
  */
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
+import type { ResolvedSettings, ResolvedToolPolicy } from '../config/resolve.js'
+import { authorizeTarget } from '../domain/authorization.js'
 import { resolveModelSelection } from '../domain/model-selection.js'
-import { confirmError, confirmRequired, ownerOf } from '../domain/ownership.js'
-import { renderClosed, renderModelSelection, renderOpened, renderText, renderUpdated } from '../format/renders.js'
+import {
+  renderClosed,
+  renderModelSelection,
+  renderOpened,
+  renderText,
+  renderUpdated,
+} from '../format/renders.js'
 import { requireController, requireWorkspaceController } from '../host/services.js'
 import { asToolArgs, stringArg } from '../shared/args.js'
-import { ErrorCode, PermissionMode, ToolName } from '../shared/enums.js'
+import { ErrorCode, ToolName } from '../shared/enums.js'
 import { errorMessage, sessionHubError, sessionHubText, toErrorText } from '../shared/errors.js'
+import { callerIdOf } from '../shared/exec.js'
 import type {
   HostContext,
   ModelChangeView,
   TitleChangeView,
   ToolArgs,
   ToolExecContext,
-  ToolOptions,
   UpdatedSessionView,
 } from '../shared/types.js'
 
 const SESSION_UPDATE_DESCRIPTION =
   'Update an existing DeepSeek Harness session: rename it and/or select its model.'
 
-const SESSION_UPDATE_DESCRIPTION_OWNED = [
-  SESSION_UPDATE_DESCRIPTION,
-  'Updating a session the caller did not create requires confirm: true.',
-].join(' ')
-
 const SESSION_CLOSE_DESCRIPTION = [
   'Close a DeepSeek Harness session by archiving it and stopping its activity.',
-  'Restore it later with session_open. The calling session cannot close itself.',
-].join(' ')
-
-const SESSION_CLOSE_DESCRIPTION_OWNED = [
-  'Close a DeepSeek Harness session by archiving it and stopping its activity.',
-  'Restore it later with session_open. The calling session cannot close itself.',
-  'Closing a session the caller did not create requires confirm: true.',
+  'Restore it later with session_open.',
 ].join(' ')
 
 const SESSION_OPEN_DESCRIPTION = [
-  'Restore a previously closed (archived) DeepSeek Harness session. It is idempotent and needs no confirmation.',
+  'Restore a previously closed (archived) DeepSeek Harness session. It is idempotent.',
 ].join(' ')
 
-/** Build the mutating session tools bound to a host context. */
-export function createManageTools(
-  ctx: HostContext,
-  options: ToolOptions = { permissionMode: PermissionMode.Permissive },
-): ToolDefinition[] {
+/** Build the mutating session tools bound to a host context and config. */
+export function createManageTools(ctx: HostContext, settings: ResolvedSettings): ToolDefinition[] {
   return [
-    createSessionUpdateTool(ctx, options.permissionMode),
-    createSessionCloseTool(ctx, options.permissionMode),
-    createSessionOpenTool(ctx),
+    createSessionUpdateTool(ctx, settings.tools[ToolName.SessionUpdate]),
+    createSessionCloseTool(ctx, settings.tools[ToolName.SessionClose]),
+    createSessionOpenTool(ctx, settings.tools[ToolName.SessionOpen]),
   ]
 }
 
-function createSessionUpdateTool(ctx: HostContext, permissionMode: PermissionMode): ToolDefinition {
-  const owned = permissionMode === PermissionMode.Owned
+function createSessionUpdateTool(ctx: HostContext, policy: ResolvedToolPolicy): ToolDefinition {
   const properties: Record<string, unknown> = {
     session_id: {
       type: 'string',
@@ -83,16 +77,11 @@ function createSessionUpdateTool(ctx: HostContext, permissionMode: PermissionMod
       description: 'Reasoning effort for the selected model. Requires model.',
     },
   }
-  if (owned) {
-    properties.confirm = {
-      type: 'boolean',
-      description: 'Must be true to update a session the caller did not create.',
-    }
-  }
+  addConfirmProperty(properties, policy.confirm, 'update')
 
   return {
     name: ToolName.SessionUpdate,
-    description: owned ? SESSION_UPDATE_DESCRIPTION_OWNED : SESSION_UPDATE_DESCRIPTION,
+    description: withConfirmHint(SESSION_UPDATE_DESCRIPTION, policy.confirm),
     parameters: {
       type: 'object',
       properties,
@@ -104,7 +93,7 @@ function createSessionUpdateTool(ctx: HostContext, permissionMode: PermissionMod
     },
     async execute(rawArgs, exec) {
       try {
-        return await executeSessionUpdate(ctx, rawArgs, exec, permissionMode)
+        return await executeSessionUpdate(ctx, rawArgs, exec, policy)
       } catch (error) {
         return toErrorText(error)
       }
@@ -112,24 +101,18 @@ function createSessionUpdateTool(ctx: HostContext, permissionMode: PermissionMod
   } satisfies ToolDefinition
 }
 
-function createSessionCloseTool(ctx: HostContext, permissionMode: PermissionMode): ToolDefinition {
-  const owned = permissionMode === PermissionMode.Owned
+function createSessionCloseTool(ctx: HostContext, policy: ResolvedToolPolicy): ToolDefinition {
   const properties: Record<string, unknown> = {
     session_id: {
       type: 'string',
       description: 'Session id to close.',
     },
   }
-  if (owned) {
-    properties.confirm = {
-      type: 'boolean',
-      description: 'Must be true to close a session the caller did not create.',
-    }
-  }
+  addConfirmProperty(properties, policy.confirm, 'close')
 
   return {
     name: ToolName.SessionClose,
-    description: owned ? SESSION_CLOSE_DESCRIPTION_OWNED : SESSION_CLOSE_DESCRIPTION,
+    description: withConfirmHint(SESSION_CLOSE_DESCRIPTION, policy.confirm),
     parameters: {
       type: 'object',
       properties,
@@ -141,7 +124,7 @@ function createSessionCloseTool(ctx: HostContext, permissionMode: PermissionMode
     },
     async execute(rawArgs, exec) {
       try {
-        return await executeSessionClose(ctx, rawArgs, exec, permissionMode)
+        return await executeSessionClose(ctx, rawArgs, exec, policy)
       } catch (error) {
         return toErrorText(error)
       }
@@ -149,27 +132,30 @@ function createSessionCloseTool(ctx: HostContext, permissionMode: PermissionMode
   } satisfies ToolDefinition
 }
 
-function createSessionOpenTool(ctx: HostContext): ToolDefinition {
+function createSessionOpenTool(ctx: HostContext, policy: ResolvedToolPolicy): ToolDefinition {
+  const properties: Record<string, unknown> = {
+    session_id: {
+      type: 'string',
+      description: 'Session id to restore from the archive.',
+    },
+  }
+  addConfirmProperty(properties, policy.confirm, 'open')
+
   return {
     name: ToolName.SessionOpen,
-    description: SESSION_OPEN_DESCRIPTION,
+    description: withConfirmHint(SESSION_OPEN_DESCRIPTION, policy.confirm),
     parameters: {
       type: 'object',
-      properties: {
-        session_id: {
-          type: 'string',
-          description: 'Session id to restore from the archive.',
-        },
-      },
+      properties,
       required: ['session_id'],
     },
     output: {
       schema: { type: 'string' },
       render: renderText,
     },
-    async execute(rawArgs) {
+    async execute(rawArgs, exec) {
       try {
-        return await executeSessionOpen(ctx, rawArgs)
+        return await executeSessionOpen(ctx, rawArgs, exec, policy)
       } catch (error) {
         return toErrorText(error)
       }
@@ -177,11 +163,38 @@ function createSessionOpenTool(ctx: HostContext): ToolDefinition {
   } satisfies ToolDefinition
 }
 
+/** `confirm` only exists in the schema when it can actually be required. */
+function addConfirmProperty(
+  properties: Record<string, unknown>,
+  confirm: ResolvedToolPolicy['confirm'],
+  verb: string,
+): void {
+  if (confirm === 'never') return
+  properties.confirm = {
+    type: 'boolean',
+    description:
+      confirm === 'always'
+        ? `Must be true to ${verb} any session.`
+        : `Must be true to ${verb} a session the caller did not create.`,
+  }
+}
+
+function withConfirmHint(base: string, confirm: ResolvedToolPolicy['confirm']): string {
+  switch (confirm) {
+    case 'never':
+      return base
+    case 'non-owned':
+      return `${base} Acting on a session the caller did not create requires confirm: true.`
+    case 'always':
+      return `${base} Every call requires confirm: true.`
+  }
+}
+
 async function executeSessionUpdate(
   ctx: HostContext,
   rawArgs: unknown,
   exec: ToolExecContext,
-  permissionMode: PermissionMode,
+  policy: ResolvedToolPolicy,
 ): Promise<string> {
   const args = asToolArgs(rawArgs)
   const controller = requireController(ctx)
@@ -189,7 +202,7 @@ async function executeSessionUpdate(
   const sessionId = stringArg(args, 'session_id')
   if (sessionId === '') return sessionHubText('session_id is required')
 
-  const denial = await ownedDenial(sessionId, args, permissionMode, callerIdOf(exec))
+  const denial = await authorize(sessionId, args, exec, policy, 'update')
   if (denial !== null) return denial
 
   const title = stringArg(args, 'title')
@@ -244,20 +257,15 @@ async function executeSessionClose(
   ctx: HostContext,
   rawArgs: unknown,
   exec: ToolExecContext,
-  permissionMode: PermissionMode,
+  policy: ResolvedToolPolicy,
 ): Promise<string> {
   const args = asToolArgs(rawArgs)
   const sessionId = stringArg(args, 'session_id')
   if (sessionId === '') return sessionHubText('session_id is required')
 
-  const callerId = callerIdOf(exec)
-  // Self-close is refused outright in both modes, before any confirmation
-  // check: owned mode's `confirm: true` is not an escape hatch for it.
-  if (callerId !== '' && sessionId === callerId) {
-    return sessionHubError(ErrorCode.SelfCloseForbidden, 'a session cannot close itself')
-  }
-
-  const denial = await ownedDenial(sessionId, args, permissionMode, callerId)
+  // Self-close is decided by `allowSelf` (false by default) before any
+  // confirmation check: `confirm: true` is not an escape hatch for it.
+  const denial = await authorize(sessionId, args, exec, policy, 'close')
   if (denial !== null) return denial
 
   const workspaceController = requireWorkspaceController(ctx)
@@ -270,10 +278,19 @@ async function executeSessionClose(
   return renderClosed(sessionId)
 }
 
-async function executeSessionOpen(ctx: HostContext, rawArgs: unknown): Promise<string> {
+async function executeSessionOpen(
+  ctx: HostContext,
+  rawArgs: unknown,
+  exec: ToolExecContext,
+  policy: ResolvedToolPolicy,
+): Promise<string> {
   const args = asToolArgs(rawArgs)
   const sessionId = stringArg(args, 'session_id')
   if (sessionId === '') return sessionHubText('session_id is required')
+
+  // Opening is harmless and `allowSelf` is not part of its documented policy.
+  const denial = await authorize(sessionId, args, exec, policy, 'open')
+  if (denial !== null) return denial
 
   const workspaceController = requireWorkspaceController(ctx)
   try {
@@ -285,24 +302,28 @@ async function executeSessionOpen(ctx: HostContext, rawArgs: unknown): Promise<s
   return renderOpened(sessionId)
 }
 
-/**
- * Enforce owned-mode authorization.
- *
- * `confirm` only counts when it is the boolean true; "true", 1 and the like
- * must not be accepted as authorization.
- */
-async function ownedDenial(
+/** Run the shared target authorization; `null` means "allowed". */
+async function authorize(
   sessionId: string,
   args: ToolArgs,
-  permissionMode: PermissionMode,
-  callerId: string,
+  exec: ToolExecContext,
+  policy: ResolvedToolPolicy,
+  verb: 'update' | 'close' | 'open',
 ): Promise<string | null> {
-  if (permissionMode !== PermissionMode.Owned) return null
-  const ownerId = await ownerOf(sessionId)
-  if (confirmRequired(ownerId, callerId) && args.confirm !== true) {
-    return confirmError(sessionId)
-  }
-  return null
+  const allowSelf = verb === 'open' ? true : policy.allowSelf
+  const result = await authorizeTarget({
+    sessionId,
+    callerId: callerIdOf(exec),
+    targets: policy.targets,
+    confirm: policy.confirm,
+    allowSelf,
+    confirmGiven: args.confirm,
+    selfError:
+      verb === 'close'
+        ? sessionHubError(ErrorCode.SelfCloseForbidden, 'a session cannot close itself')
+        : sessionHubError(ErrorCode.SelfTarget, `a session cannot ${verb} itself`),
+  })
+  return 'error' in result ? result.error : null
 }
 
 /** True when any model-selection argument carries a value. */
@@ -312,8 +333,4 @@ function hasModelRequest(args: ToolArgs): boolean {
     stringArg(args, 'provider') !== '' ||
     stringArg(args, 'reasoning_effort') !== ''
   )
-}
-
-function callerIdOf(exec: ToolExecContext): string {
-  return typeof exec.agent?.id === 'string' ? exec.agent.id.trim() : ''
 }

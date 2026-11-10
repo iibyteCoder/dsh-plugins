@@ -108,6 +108,7 @@ export function renderWait(
   outcome: WaitOutcome,
   timeoutMs: number,
   reply: string,
+  replyMaxChars: number = MAX_REPLY_CHARS,
 ): string {
   if (outcome === WaitOutcome.Archived) return `会话 ${sessionId} 已归档，不会运行`
   if (outcome === WaitOutcome.Cold) return `会话 ${sessionId} 空闲（未加载）`
@@ -119,7 +120,7 @@ export function renderWait(
   }
 
   const idle = `会话 ${sessionId} 已空闲`
-  const text = truncateText(reply, MAX_REPLY_CHARS)
+  const text = truncateText(reply, replyMaxChars)
   return text === '' ? idle : `${idle}\n- reply: ${text}`
 }
 

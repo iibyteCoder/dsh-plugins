@@ -7,6 +7,7 @@ import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 
 import { ownerIndexPath, readOwnerIndex, recordOwner } from '../src/host/owner-index.js'
 import { createSessionCreateTool } from '../src/tools/create.js'
+import { ToolName } from '../src/shared/enums.js'
 import type { AgentMessage, HostContext } from '../src/shared/types.js'
 import {
   createTempHome,
@@ -17,6 +18,7 @@ import {
   type FakeExecAgent,
 } from './helpers/fixtures.js'
 import { assertSupportedSchema } from './helpers/schema-guard.js'
+import { createSettings } from './helpers/settings.js'
 
 const callerId = 'caller'
 const alphaDir = path.resolve('/fixtures/alpha')
@@ -119,11 +121,12 @@ async function runCreate(
   args: Record<string, unknown>,
   ctx: HostContext = createCtx().ctx,
   exec: FakeExec = defaultExec,
+  settings = createSettings(),
 ): Promise<string> {
   // Every valid create carries the required initial task; tests that exercise
   // the missing-message path call the tool directly.
   return executeTool(
-    createSessionCreateTool(ctx),
+    createSessionCreateTool(ctx, settings),
     { message: 'build the thing', ...args },
     exec,
   )
@@ -364,11 +367,11 @@ describe('session_create', () => {
     const { ctx, calls } = createCtx()
 
     assert.equal(
-      await executeTool(createSessionCreateTool(ctx), {}, defaultExec),
+      await executeTool(createSessionCreateTool(ctx, createSettings()), {}, defaultExec),
       'session-hub: message is required',
     )
     assert.equal(
-      await executeTool(createSessionCreateTool(ctx), { message: '   ' }, defaultExec),
+      await executeTool(createSessionCreateTool(ctx, createSettings()), { message: '   ' }, defaultExec),
       'session-hub: message is required',
     )
     assert.deepEqual(calls.create, [])
@@ -434,8 +437,174 @@ describe('session_create', () => {
     assert.equal(text, 'session-hub: create failed: host returned no session id')
   })
 
+  // --- policy ---------------------------------------------------------------
+
+  test('task "optional" allows an omitted message and does not wake the session', async () => {
+    const { ctx, calls } = createCtx()
+    const settings = createSettings({ [ToolName.SessionCreate]: { task: 'optional' } })
+
+    const text = await executeTool(
+      createSessionCreateTool(ctx, settings),
+      {},
+      defaultExec,
+    )
+
+    assert.deepEqual(calls.create, [{}])
+    assert.deepEqual(calls.resolveAgent, [])
+    assert.deepEqual(calls.followup, [])
+    assert.match(text, /^已创建会话 new-session$/m)
+    assert.match(text, /^- started: 未提供初始任务（未唤醒）$/m)
+  })
+
+  test('task "optional" still delivers a provided message', async () => {
+    const { ctx, calls } = createCtx()
+    const settings = createSettings({ [ToolName.SessionCreate]: { task: 'optional' } })
+
+    const text = await runCreate({ message: 'hello' }, ctx, defaultExec, settings)
+
+    assert.equal(calls.followup.length, 1)
+    assert.match(text, /^- started: 已投递初始任务$/m)
+  })
+
+  test('allowTitle: false removes the parameter and ignores a supplied title', async () => {
+    const { ctx, calls } = createCtx()
+    const settings = createSettings({ [ToolName.SessionCreate]: { allowTitle: false } })
+
+    const tool = createSessionCreateTool(ctx, settings)
+    assert.equal('title' in propertiesOf(tool), false)
+
+    const text = await runCreate({ title: 'ignored' }, ctx, defaultExec, settings)
+
+    assert.deepEqual(calls.rename, [])
+    assert.doesNotMatch(text, /^- title:/m)
+  })
+
+  test('allowModel: false removes the model parameters and ignores model arguments', async () => {
+    const { ctx, calls } = createCtx()
+    const settings = createSettings({ [ToolName.SessionCreate]: { allowModel: false } })
+
+    const parameters = propertiesOf(createSessionCreateTool(ctx, settings))
+    assert.equal('model' in parameters, false)
+    assert.equal('provider' in parameters, false)
+    assert.equal('reasoning_effort' in parameters, false)
+
+    const text = await runCreate({ model: 'model-a', provider: 'p1' }, ctx, defaultExec, settings)
+
+    assert.equal(calls.modelCatalog, 0)
+    assert.deepEqual(calls.selectModel, [])
+    assert.doesNotMatch(text, /^- model:/m)
+  })
+
+  test('ownership.record: false does not write the owner index', async () => {
+    const { ctx } = createCtx()
+    const settings = createSettings({}, { ownership: { record: false } })
+
+    const text = await runCreate({}, ctx, defaultExec, settings)
+
+    assert.deepEqual(await readOwnerIndex(), {})
+    assert.match(text, /^- owner: 未记录（ownership.record 已关闭）$/m)
+  })
+
+  test('attribution: false drops the body prefix but keeps the source sender', async () => {
+    const { ctx, calls } = createCtx()
+    const settings = createSettings({ [ToolName.SessionCreate]: { attribution: false } })
+
+    await runCreate({ message: 'hello there' }, ctx, defaultExec, settings)
+
+    const message = calls.followup[0]!
+    assert.deepEqual(message.content, [{ type: 'text', text: 'hello there' }])
+    assert.equal(message.source.kind, 'agent-message')
+    assert.equal(message.source.senderSessionId, callerId)
+  })
+
+  test('workspace "same" only accepts the caller cwd', async () => {
+    const { ctx, calls } = createCtx()
+    const settings = createSettings({ [ToolName.SessionCreate]: { workspace: 'same' } })
+
+    const inherited = await runCreate({}, ctx, execWithCwd(alphaDir), settings)
+    assert.deepEqual(calls.create, [{ cwd: alphaDir }])
+    assert.match(inherited, /^已创建会话 new-session$/m)
+
+    const explicitSame = await runCreate({ cwd: alphaDir }, ctx, execWithCwd(alphaDir), settings)
+    assert.deepEqual(calls.create.at(-1), { cwd: alphaDir })
+    assert.match(explicitSame, /^已创建会话 new-session$/m)
+
+    const denied = await runCreate({ cwd: betaDir }, ctx, execWithCwd(alphaDir), settings)
+    assert.equal(
+      denied,
+      `session-hub: workspace policy "same" only allows the caller cwd "${alphaDir}"`,
+    )
+
+    const workspace = await runCreate({ workspace: 'ws-alpha' }, ctx, execWithCwd(alphaDir), settings)
+    assert.match(workspace, /^已创建会话 new-session$/m)
+
+    const otherWorkspace = await runCreate(
+      { workspace: 'ws-beta' },
+      ctx,
+      execWithCwd(alphaDir),
+      settings,
+    )
+    assert.match(otherWorkspace, /workspace policy "same" only allows the caller cwd/)
+    assert.equal(calls.create.length, 3)
+  })
+
+  test('workspace "allowlist" requires the target to be an allowed workspace', async () => {
+    const { ctx, calls } = createCtx()
+    const settings = createSettings(
+      { [ToolName.SessionCreate]: { workspace: 'allowlist' } },
+      { filters: { allowWorkspaces: ['ws-alpha'] } },
+    )
+
+    const allowed = await runCreate({ workspace: 'ws-alpha' }, ctx, defaultExec, settings)
+    assert.deepEqual(calls.create, [{ workspaceId: 'ws-alpha' }])
+    assert.match(allowed, /^已创建会话 new-session$/m)
+
+    const denied = await runCreate({ workspace: 'ws-beta' }, ctx, defaultExec, settings)
+    assert.equal(
+      denied,
+      'session-hub: workspace policy "allowlist" does not allow workspace "ws-beta"',
+    )
+    assert.equal(calls.create.length, 1)
+  })
+
+  test('workspace "allowlist" accepts a cwd inside an allowed workspace', async () => {
+    const { ctx, calls } = createCtx()
+    const settings = createSettings(
+      { [ToolName.SessionCreate]: { workspace: 'allowlist' } },
+      { filters: { allowWorkspaces: ['ws-alpha'] } },
+    )
+
+    const inside = path.join(alphaDir, 'sub')
+    const allowed = await runCreate({ cwd: inside }, ctx, defaultExec, settings)
+    assert.deepEqual(calls.create, [{ cwd: inside }])
+    assert.match(allowed, /^已创建会话 new-session$/m)
+
+    const outside = await runCreate({ cwd: betaDir }, ctx, defaultExec, settings)
+    assert.equal(
+      outside,
+      `session-hub: workspace policy "allowlist" does not allow cwd "${betaDir}"`,
+    )
+
+    const inheritedOutside = await runCreate({}, ctx, execWithCwd(betaDir), settings)
+    assert.equal(
+      inheritedOutside,
+      `session-hub: workspace policy "allowlist" does not allow the caller cwd "${betaDir}"`,
+    )
+  })
+
+  test('workspace "same" requires a caller cwd when the target is implicit', async () => {
+    const settings = createSettings({ [ToolName.SessionCreate]: { workspace: 'same' } })
+
+    const text = await runCreate({}, createCtx().ctx, execWithCwd(undefined), settings)
+
+    assert.equal(
+      text,
+      'session-hub: workspace policy "same" requires a caller cwd',
+    )
+  })
+
   test('session_create schema stays within the supported keyword subset', () => {
-    const tool = createSessionCreateTool(createCtx().ctx)
+    const tool = createSessionCreateTool(createCtx().ctx, createSettings())
 
     assertSupportedSchema(tool.parameters, 'session_create.parameters')
     assertSupportedSchema(tool.output.schema, 'session_create.output.schema')
@@ -446,7 +615,7 @@ describe('session_create', () => {
   })
 
   test('session_create requires a message and no longer takes initial_message', () => {
-    const parameters = parametersOf(createSessionCreateTool(createCtx().ctx))
+    const parameters = parametersOf(createSessionCreateTool(createCtx().ctx, createSettings()))
 
     assert.deepEqual(parameters.required, ['message'])
     assert.equal(parameters.properties.message?.type, 'string')

@@ -1,9 +1,9 @@
 /**
  * `session_search` scoping and result shaping.
  *
- * The permission mode only changes which sessions the host index is asked
- * about, so the allowed id set is resolved here, before the search runs: a mode
- * can never return a session the caller is not allowed to see.
+ * The read policy changes which sessions the host index is asked about, so the
+ * allowed id set is resolved here, before the search runs: a policy can never
+ * return a session the caller is not allowed to see.
  *
  * The host answers one hit per matching event, so the same session may repeat;
  * hits are collapsed per session (first match wins) and their titles are
@@ -11,34 +11,42 @@
  */
 import { readOwnerIndex } from '../host/owner-index.js'
 import { executeSessionSearch, requireSessionQuery } from '../host/search.js'
-import { readSessionTitles, sessionIdOf } from '../host/session-access.js'
-import type { SessionSearchFilter, SessionSearchItem, SessionSearchRequest } from '../host/contracts.js'
-import { PermissionMode } from '../shared/enums.js'
+import {
+  listSessionItems,
+  loadWorkspaces,
+  readSessionTitles,
+  sessionCwd,
+  sessionIdOf,
+  workspaceForSession,
+} from '../host/session-access.js'
+import { readServices, serviceOf } from '../host/services.js'
+import type { SessionSearchFilter, SessionSearchItem, SessionSearchRequest, SessionSummary } from '../host/contracts.js'
+import { hasAnyFilter, isSessionVisible, type VisibilityRules } from './visibility.js'
+import { HostService } from '../shared/enums.js'
+import type { SessionController } from '../host/contracts.js'
 import type { HostContext, SearchHit, SearchView } from '../shared/types.js'
 
 /** One validated `session_search` call. */
-export interface SearchOptions {
+export interface SearchOptions extends VisibilityRules {
   readonly query: string
   readonly limit: number
   /** Exact cwd to restrict the search to; `''` means no cwd clause. */
   readonly cwd: string
-  readonly permissionMode: PermissionMode
-  readonly callerId: string
 }
 
 const EMPTY_RESULT: SearchView = { hits: [], total: 0, hasMore: false }
 
-/** Search the session index within the caller's permission scope. */
+/** Search the session index within the caller's read scope and filters. */
 export async function searchSessions(
   ctx: HostContext,
   options: SearchOptions,
   signal?: AbortSignal,
 ): Promise<SearchView> {
-  // A profile without the search service cannot answer in either mode, so the
-  // capability check comes before permission scoping.
+  // A profile without the search service cannot answer, so the capability
+  // check comes before permission scoping.
   const service = requireSessionQuery(ctx)
 
-  const allowed = await allowedSessionIds(options)
+  const allowed = await allowedSessionIds(ctx, options)
   if (allowed !== undefined && allowed.length === 0) return EMPTY_RESULT
 
   const result = await executeSessionSearch(service, buildRequest(options, allowed), signal)
@@ -54,21 +62,51 @@ export async function searchSessions(
 /**
  * Session ids the caller may search, or `undefined` for "no id restriction".
  *
- * `permissive` searches the whole index. `owned` allows the caller's own
- * session plus every session whose recorded owner is the caller; an
- * unidentifiable caller therefore owns nothing and gets an empty set.
+ * `all` with no filters searches the whole index. Any scope or filter needs
+ * the session listing to decide, so a missing listing degrades to "nothing is
+ * visible" instead of silently searching the whole index.
  */
-async function allowedSessionIds(options: SearchOptions): Promise<string[] | undefined> {
-  if (options.permissionMode !== PermissionMode.Owned) return undefined
+async function allowedSessionIds(
+  ctx: HostContext,
+  options: SearchOptions,
+): Promise<string[] | undefined> {
+  if (options.scope === 'all' && !hasAnyFilter(options.filters)) return undefined
 
-  const allowed = new Set<string>()
-  if (options.callerId !== '') allowed.add(options.callerId)
-
-  const owners = await readOwnerIndex()
-  for (const [sessionId, record] of Object.entries(owners)) {
-    if (record.ownerSessionId === options.callerId) allowed.add(sessionId)
+  const controller = serviceOf(ctx, HostService.SessionController) as
+    | SessionController
+    | null
+    | undefined
+  if (controller === undefined || controller === null || typeof controller.list !== 'function') {
+    return []
   }
-  return [...allowed]
+
+  let items: readonly SessionSummary[]
+  try {
+    items = await listSessionItems(controller)
+  } catch {
+    return []
+  }
+
+  const workspaces = await loadWorkspaces(readServices(ctx).workspaces)
+  const owners = await readOwnerIndex()
+  const allowed: string[] = []
+
+  for (const item of items) {
+    const sessionId = sessionIdOf(item)
+    if (sessionId === '') continue
+    const visible = isSessionVisible(
+      {
+        sessionId,
+        ownerId: owners[sessionId]?.ownerSessionId ?? '',
+        cwd: sessionCwd(item),
+        workspace: workspaceForSession(item, workspaces),
+      },
+      options,
+    )
+    if (visible) allowed.push(sessionId)
+  }
+
+  return allowed
 }
 
 /** Build the request, omitting `sessionFilters` entirely when nothing filters. */

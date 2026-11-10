@@ -4,7 +4,6 @@ import { after, beforeEach, describe, test } from 'node:test'
 
 import { ownerIndexPath, recordOwner } from '../src/host/owner-index.js'
 import { createManageTools } from '../src/tools/manage.js'
-import { PermissionMode } from '../src/shared/enums.js'
 import type { HostContext } from '../src/shared/types.js'
 import {
   createTempHome,
@@ -15,8 +14,15 @@ import {
   type FakeExec,
 } from './helpers/fixtures.js'
 import { assertSupportedSchema } from './helpers/schema-guard.js'
+import { createSettings } from './helpers/settings.js'
 
 const callerId = 'caller'
+
+/** The old "non-owned confirm policy" behaviour, now expressed as a confirm policy. */
+const OWNED_POLICY = { confirm: 'non-owned' } as const
+
+/** The old "never confirm policy" behaviour, now expressed as a confirm policy. */
+const PERMISSIVE_POLICY = { confirm: 'never' } as const
 
 const catalog = {
   default: { provider: 'p1', model: 'model-a' },
@@ -87,28 +93,32 @@ function createCtx() {
   return { ctx, calls }
 }
 
-// The existing authorization tests describe the owned mode; permissive tests
-// opt in explicitly so the default of this helper cannot hide a regression.
+// The existing authorization tests describe the non-owned confirmation policy;
+// permissive tests opt in explicitly so the default of this helper cannot hide
+// a regression.
 function toolByName(
   ctx: HostContext,
   name: string,
-  permissionMode: PermissionMode = PermissionMode.Owned,
+  policy: Readonly<Record<string, unknown>> = OWNED_POLICY,
 ) {
-  return findTool(createManageTools(ctx, { permissionMode }), name)
+  return findTool(createManageTools(ctx, createSettings({ [name]: policy })), name)
 }
 
 function run(
   name: string,
   args: unknown,
   ctx: HostContext,
-  permissionMode: PermissionMode = PermissionMode.Owned,
+  policy: Readonly<Record<string, unknown>> = OWNED_POLICY,
   exec: FakeExec = { agent: { id: callerId } },
 ): Promise<string> {
-  return executeTool(toolByName(ctx, name, permissionMode), args, exec)
+  return executeTool(toolByName(ctx, name, policy), args, exec)
 }
 
 const confirmErrorText = (sessionId: string): string =>
   `session-hub: CONFIRM_REQUIRED: session "${sessionId}" is not owned by the calling session`
+
+const targetNotAllowedText = (sessionId: string): string =>
+  `session-hub: TARGET_NOT_ALLOWED: session "${sessionId}" is not owned by the calling session`
 
 const selfCloseErrorText = 'session-hub: SELF_CLOSE_FORBIDDEN: a session cannot close itself'
 
@@ -186,7 +196,7 @@ describe('session_update / close / open', () => {
     assert.deepEqual(calls.rename, [])
   })
 
-  test('session_update applies to a session created by another session in permissive mode', async () => {
+  test('session_update applies to a session created by another session in never confirm policy', async () => {
     await recordOwner('target', 'other')
     const { ctx, calls } = createCtx()
 
@@ -194,7 +204,7 @@ describe('session_update / close / open', () => {
       'session_update',
       { session_id: 'target', title: ' Renamed ' },
       ctx,
-      PermissionMode.Permissive,
+      PERMISSIVE_POLICY,
     )
 
     assert.equal(text, ['已更新会话 target', '- title: Renamed'].join('\n'))
@@ -362,7 +372,7 @@ describe('session_update / close / open', () => {
     assert.equal(text, '已关闭会话 child（已归档，可用 session_open 恢复）')
   })
 
-  test('session_close refuses to close the calling session in owned mode', async () => {
+  test('session_close refuses to close the calling session in non-owned confirm policy', async () => {
     await recordOwner(callerId, 'creator')
     const { ctx, calls } = createCtx()
 
@@ -372,7 +382,7 @@ describe('session_update / close / open', () => {
     assert.deepEqual(calls.archiveSession, [])
   })
 
-  test('session_close has no confirm escape hatch for self-close in owned mode', async () => {
+  test('session_close has no confirm escape hatch for self-close in non-owned confirm policy', async () => {
     await recordOwner(callerId, 'creator')
     const { ctx, calls } = createCtx()
 
@@ -432,27 +442,27 @@ describe('session_update / close / open', () => {
     assert.equal(text, 'session-hub: session_id is required')
   })
 
-  test('session_close archives any session in permissive mode', async () => {
+  test('session_close archives any session in never confirm policy', async () => {
     await recordOwner('target', 'other')
     const { ctx, calls } = createCtx()
 
-    const text = await run('session_close', { session_id: 'target' }, ctx, PermissionMode.Permissive)
+    const text = await run('session_close', { session_id: 'target' }, ctx, PERMISSIVE_POLICY)
 
     assert.deepEqual(calls.archiveSession, [{ sessionId: 'target', stopActivity: true }])
     assert.equal(text, '已关闭会话 target（已归档，可用 session_open 恢复）')
   })
 
-  test('session_close refuses to close the calling session in permissive mode', async () => {
+  test('session_close refuses to close the calling session in never confirm policy', async () => {
     await recordOwner(callerId, 'creator')
     const { ctx, calls } = createCtx()
 
-    const text = await run('session_close', { session_id: callerId }, ctx, PermissionMode.Permissive)
+    const text = await run('session_close', { session_id: callerId }, ctx, PERMISSIVE_POLICY)
 
     assert.equal(text, selfCloseErrorText)
     assert.deepEqual(calls.archiveSession, [])
   })
 
-  test('session_close has no confirm escape hatch for self-close in permissive mode', async () => {
+  test('session_close has no confirm escape hatch for self-close in never confirm policy', async () => {
     await recordOwner(callerId, 'creator')
     const { ctx, calls } = createCtx()
 
@@ -460,7 +470,7 @@ describe('session_update / close / open', () => {
       'session_close',
       { session_id: callerId, confirm: true },
       ctx,
-      PermissionMode.Permissive,
+      PERMISSIVE_POLICY,
     )
 
     assert.equal(text, selfCloseErrorText)
@@ -472,28 +482,17 @@ describe('session_update / close / open', () => {
   test('session_open unarchives the session without confirmation', async () => {
     const { ctx, calls } = createCtx()
 
-    const text = await run('session_open', { session_id: 'archived' }, ctx)
+    const text = await run('session_open', { session_id: 'archived' }, ctx, PERMISSIVE_POLICY)
 
     assert.deepEqual(calls.unarchiveSession, [{ sessionId: 'archived' }])
     assert.equal(text, '已恢复会话 archived')
   })
 
-  test('session_open unarchives directly in both permission modes', async () => {
-    for (const permissionMode of [PermissionMode.Permissive, PermissionMode.Owned]) {
-      const { ctx, calls } = createCtx()
-
-      const text = await run('session_open', { session_id: 'archived' }, ctx, permissionMode)
-
-      assert.equal(text, '已恢复会话 archived')
-      assert.deepEqual(calls.unarchiveSession, [{ sessionId: 'archived' }])
-    }
-  })
-
   test('session_open is idempotent', async () => {
     const { ctx, calls } = createCtx()
 
-    const first = await run('session_open', { session_id: 'archived' }, ctx)
-    const second = await run('session_open', { session_id: 'archived' }, ctx)
+    const first = await run('session_open', { session_id: 'archived' }, ctx, PERMISSIVE_POLICY)
+    const second = await run('session_open', { session_id: 'archived' }, ctx, PERMISSIVE_POLICY)
 
     assert.equal(first, '已恢复会话 archived')
     assert.equal(second, '已恢复会话 archived')
@@ -507,7 +506,7 @@ describe('session_update / close / open', () => {
     const { ctx } = createCtx()
     Reflect.deleteProperty(ctx, 'workspaceController')
 
-    const text = await run('session_open', { session_id: 'archived' }, ctx)
+    const text = await run('session_open', { session_id: 'archived' }, ctx, PERMISSIVE_POLICY)
 
     assert.equal(text, 'session-hub: workspaceController service is unavailable in this profile')
   })
@@ -518,7 +517,7 @@ describe('session_update / close / open', () => {
       throw new Error('boom')
     }
 
-    const text = await run('session_open', { session_id: 'archived' }, ctx)
+    const text = await run('session_open', { session_id: 'archived' }, ctx, PERMISSIVE_POLICY)
 
     assert.equal(text, 'session-hub: open failed: boom')
   })
@@ -526,19 +525,159 @@ describe('session_update / close / open', () => {
   test('session_open requires a session id', async () => {
     const { ctx } = createCtx()
 
-    const text = await run('session_open', {}, ctx)
+    const text = await run('session_open', {}, ctx, PERMISSIVE_POLICY)
 
     assert.equal(text, 'session-hub: session_id is required')
   })
 
+  // --- policy ---------------------------------------------------------------
+
+  test('targets "owned" rejects a non-owner even with confirm: true', async () => {
+    await recordOwner('target', 'other')
+    const { ctx, calls } = createCtx()
+
+    const text = await run(
+      'session_update',
+      { session_id: 'target', title: 'Renamed', confirm: true },
+      ctx,
+      { targets: 'owned' },
+    )
+
+    assert.equal(text, targetNotAllowedText('target'))
+    assert.deepEqual(calls.rename, [])
+  })
+
+  test('targets "owned" allows the owner', async () => {
+    await recordOwner('target', callerId)
+    const { ctx, calls } = createCtx()
+
+    const text = await run(
+      'session_update',
+      { session_id: 'target', title: 'Renamed' },
+      ctx,
+      { targets: 'owned' },
+    )
+
+    assert.equal(text, ['已更新会话 target', '- title: Renamed'].join('\n'))
+    assert.deepEqual(calls.rename, [{ sessionId: 'target', title: 'Renamed' }])
+  })
+
+  test('confirm "always" requires confirmation even for the owner', async () => {
+    await recordOwner('target', callerId)
+    const { ctx, calls } = createCtx()
+
+    const denied = await run(
+      'session_update',
+      { session_id: 'target', title: 'Renamed' },
+      ctx,
+      { confirm: 'always' },
+    )
+    assert.equal(denied, confirmErrorText('target'))
+    assert.deepEqual(calls.rename, [])
+
+    const allowed = await run(
+      'session_update',
+      { session_id: 'target', title: 'Renamed', confirm: true },
+      ctx,
+      { confirm: 'always' },
+    )
+    assert.equal(allowed, ['已更新会话 target', '- title: Renamed'].join('\n'))
+  })
+
+  test('session_update allowSelf: false rejects updating the caller', async () => {
+    const { ctx, calls } = createCtx()
+
+    const text = await run(
+      'session_update',
+      { session_id: callerId, title: 'Renamed' },
+      ctx,
+      { allowSelf: false },
+    )
+
+    assert.equal(text, 'session-hub: SELF_TARGET: a session cannot update itself')
+    assert.deepEqual(calls.rename, [])
+  })
+
+  test('session_update allows updating the caller by default', async () => {
+    const { ctx, calls } = createCtx()
+
+    const text = await run('session_update', { session_id: callerId, title: 'Renamed' }, ctx, {})
+
+    assert.equal(text, ['已更新会话 caller', '- title: Renamed'].join('\n'))
+    assert.deepEqual(calls.rename, [{ sessionId: callerId, title: 'Renamed' }])
+  })
+
+  test('session_close allowSelf: true allows closing the caller', async () => {
+    await recordOwner(callerId, 'creator')
+    const { ctx, calls } = createCtx()
+
+    const text = await run(
+      'session_close',
+      { session_id: callerId },
+      ctx,
+      { allowSelf: true },
+    )
+
+    assert.equal(text, '已关闭会话 caller（已归档，可用 session_open 恢复）')
+    assert.deepEqual(calls.archiveSession, [{ sessionId: callerId, stopActivity: true }])
+  })
+
+  test('session_close targets "owned" rejects a session created by another session', async () => {
+    await recordOwner('target', 'other')
+    const { ctx, calls } = createCtx()
+
+    const text = await run('session_close', { session_id: 'target' }, ctx, { targets: 'owned' })
+
+    assert.equal(text, targetNotAllowedText('target'))
+    assert.deepEqual(calls.archiveSession, [])
+  })
+
+  test('session_open enforces its own targets and confirm policy', async () => {
+    await recordOwner('archived', 'other')
+
+    const targetDenied = await run(
+      'session_open',
+      { session_id: 'archived' },
+      createCtx().ctx,
+      { targets: 'owned' },
+    )
+    assert.equal(targetDenied, targetNotAllowedText('archived'))
+
+    const confirmDenied = await run(
+      'session_open',
+      { session_id: 'archived' },
+      createCtx().ctx,
+      { confirm: 'always' },
+    )
+    assert.equal(confirmDenied, confirmErrorText('archived'))
+
+    const { ctx, calls } = createCtx()
+    const allowed = await run(
+      'session_open',
+      { session_id: 'archived', confirm: true },
+      ctx,
+      { confirm: 'always' },
+    )
+    assert.equal(allowed, '已恢复会话 archived')
+    assert.deepEqual(calls.unarchiveSession, [{ sessionId: 'archived' }])
+  })
+
   // --- schemas --------------------------------------------------------------
 
-  test('manage tool schemas stay within the supported keyword subset in both modes', () => {
+  test('manage tool schemas stay within the supported keyword subset for every policy', () => {
     const { ctx } = createCtx()
+    const variants = [
+      createSettings(),
+      createSettings({
+        session_update: { confirm: 'non-owned', targets: 'owned' },
+        session_close: { confirm: 'always' },
+        session_open: { confirm: 'non-owned' },
+      }),
+    ]
 
-    for (const permissionMode of [PermissionMode.Permissive, PermissionMode.Owned]) {
-      for (const tool of createManageTools(ctx, { permissionMode })) {
-        const label = `${tool.name} (${permissionMode})`
+    for (const settings of variants) {
+      for (const tool of createManageTools(ctx, settings)) {
+        const label = tool.name
         assertSupportedSchema(tool.parameters, `${label}.parameters`)
         assertSupportedSchema(tool.output.schema, `${label}.output.schema`)
         for (const [name, schema] of Object.entries(parametersOf(tool).properties)) {
@@ -549,11 +688,11 @@ describe('session_update / close / open', () => {
     }
   })
 
-  test('permissive manage schemas omit confirm', () => {
+  test('the default manage schemas omit confirm', () => {
     const { ctx } = createCtx()
-    const update = parametersOf(toolByName(ctx, 'session_update', PermissionMode.Permissive))
-    const close = parametersOf(toolByName(ctx, 'session_close', PermissionMode.Permissive))
-    const open = parametersOf(toolByName(ctx, 'session_open', PermissionMode.Permissive))
+    const update = parametersOf(toolByName(ctx, 'session_update', {}))
+    const close = parametersOf(toolByName(ctx, 'session_close', {}))
+    const open = parametersOf(toolByName(ctx, 'session_open', {}))
 
     assert.deepEqual(update.required, ['session_id'])
     assert.deepEqual(close.required, ['session_id'])
@@ -563,17 +702,17 @@ describe('session_update / close / open', () => {
     assert.equal('confirm' in open.properties, false)
   })
 
-  test('owned manage schemas declare confirm as a boolean', () => {
+  test('a non-owned or always confirm policy declares confirm as a boolean', () => {
     const { ctx } = createCtx()
-    const update = parametersOf(toolByName(ctx, 'session_update', PermissionMode.Owned))
-    const close = parametersOf(toolByName(ctx, 'session_close', PermissionMode.Owned))
-    const open = parametersOf(toolByName(ctx, 'session_open', PermissionMode.Owned))
+    const update = parametersOf(toolByName(ctx, 'session_update', { confirm: 'non-owned' }))
+    const close = parametersOf(toolByName(ctx, 'session_close', { confirm: 'always' }))
+    const open = parametersOf(toolByName(ctx, 'session_open', { confirm: 'always' }))
 
     assert.deepEqual(update.required, ['session_id'])
     assert.deepEqual(close.required, ['session_id'])
     assert.deepEqual(open.required, ['session_id'])
     assert.equal(update.properties.confirm?.type, 'boolean')
     assert.equal(close.properties.confirm?.type, 'boolean')
-    assert.equal('confirm' in open.properties, false)
+    assert.equal(open.properties.confirm?.type, 'boolean')
   })
 })
